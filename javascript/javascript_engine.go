@@ -40,7 +40,7 @@ func (e *engine) Init(_ context.Context) error {
 	defer e.mu.Unlock()
 
 	if e.initialized {
-		return fmt.Errorf("engine already initialized")
+		return ErrJavascriptEngineAlreadyInitialized
 	}
 
 	e.runtime = goja.New()
@@ -50,13 +50,13 @@ func (e *engine) Init(_ context.Context) error {
 	return nil
 }
 
-// Destroy 销毁引擎
-func (e *engine) Destroy() error {
+// Close 销毁引擎
+func (e *engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrJavascriptEngineNotInitialized
 	}
 
 	e.runtime = nil
@@ -79,7 +79,7 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrJavascriptEngineNotInitialized
 	}
 
 	program, err := goja.Compile("", source, true)
@@ -98,7 +98,7 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrJavascriptEngineNotInitialized
 	}
 
 	source, err := os.ReadFile(filePath)
@@ -118,9 +118,9 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 }
 
 // LoadReader 从 Reader 加载脚本
-func (e *engine) LoadReader(ctx context.Context, reader io.Reader, name string) error {
+func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrJavascriptEngineNotInitialized
 	}
 
 	source, err := io.ReadAll(reader)
@@ -138,7 +138,7 @@ func (e *engine) Execute(ctx context.Context) (interface{}, error) {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrJavascriptEngineNotInitialized
 	}
 
 	if e.program == nil {
@@ -177,7 +177,7 @@ func (e *engine) ExecuteString(ctx context.Context, source string) (interface{},
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrJavascriptEngineNotInitialized
 	}
 
 	type result struct {
@@ -220,10 +220,10 @@ func (e *engine) RegisterGlobal(name string, value interface{}) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrJavascriptEngineNotInitialized
 	}
 
-	e.runtime.Set(name, value)
+	_ = e.runtime.Set(name, value)
 	return nil
 }
 
@@ -233,7 +233,7 @@ func (e *engine) GetGlobal(name string) (interface{}, error) {
 	defer e.mu.RUnlock()
 
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrJavascriptEngineNotInitialized
 	}
 
 	val := e.runtime.Get(name)
@@ -250,10 +250,10 @@ func (e *engine) RegisterFunction(name string, fn interface{}) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrJavascriptEngineNotInitialized
 	}
 
-	e.runtime.Set(name, fn)
+	_ = e.runtime.Set(name, fn)
 	return nil
 }
 
@@ -263,7 +263,7 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...interfac
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrJavascriptEngineNotInitialized
 	}
 
 	type result struct {
@@ -310,7 +310,7 @@ func (e *engine) RegisterModule(name string, module interface{}) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrJavascriptEngineNotInitialized
 	}
 
 	// 创建模块对象
@@ -319,15 +319,15 @@ func (e *engine) RegisterModule(name string, module interface{}) error {
 	// 如果 module 是 map，则设置属性
 	if m, ok := module.(map[string]interface{}); ok {
 		for k, v := range m {
-			moduleObj.Set(k, v)
+			_ = moduleObj.Set(k, v)
 		}
 	} else {
 		// 否则直接设置整个对象
-		e.runtime.Set(name, module)
+		_ = e.runtime.Set(name, module)
 		return nil
 	}
 
-	e.runtime.Set(name, moduleObj)
+	_ = e.runtime.Set(name, moduleObj)
 	return nil
 }
 
@@ -358,7 +358,7 @@ func (e *engine) RunProgram(ctx context.Context, program *goja.Program) (goja.Va
 	defer e.mu.Unlock()
 
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrJavascriptEngineNotInitialized
 	}
 
 	type result struct {

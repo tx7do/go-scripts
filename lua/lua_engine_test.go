@@ -14,7 +14,7 @@ func TestLuaEngine(t *testing.T) {
 	eng, err := newLuaEngine()
 	assert.Nil(t, err)
 	assert.NotNil(t, eng)
-	defer eng.Destroy()
+	defer eng.Close()
 
 	// 初始化
 	ctx := context.Background()

@@ -10,7 +10,7 @@ type Engine interface {
 	// 生命周期管理
 
 	Init(ctx context.Context) error
-	Destroy() error
+	Close() error
 	IsInitialized() bool
 
 	// 脚本加载

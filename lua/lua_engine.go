@@ -33,7 +33,7 @@ func newLuaEngine() (*engine, error) {
 // Init 初始化引擎
 func (e *engine) Init(_ context.Context) error {
 	if e.initialized {
-		return fmt.Errorf("engine already initialized")
+		return ErrLuaEngineAlreadyInitialized
 	}
 
 	e.vm = newVirtualMachine()
@@ -43,10 +43,10 @@ func (e *engine) Init(_ context.Context) error {
 	return nil
 }
 
-// Destroy 销毁引擎
-func (e *engine) Destroy() error {
+// Close 销毁引擎
+func (e *engine) Close() error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrLuaEngineNotInitialized
 	}
 
 	e.vm.Destroy()
@@ -64,7 +64,7 @@ func (e *engine) IsInitialized() bool {
 // LoadString 加载字符串脚本
 func (e *engine) LoadString(_ context.Context, source string) error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrLuaEngineNotInitialized
 	}
 
 	if err := e.vm.LoadString(source); err != nil {
@@ -78,7 +78,7 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 // LoadFile 加载脚本文件
 func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrLuaEngineNotInitialized
 	}
 
 	if err := e.vm.LoadFile(filePath); err != nil {
@@ -90,9 +90,9 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 }
 
 // LoadReader 从 Reader 加载脚本
-func (e *engine) LoadReader(ctx context.Context, reader io.Reader, name string) error {
+func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrLuaEngineNotInitialized
 	}
 
 	source, err := io.ReadAll(reader)
@@ -107,7 +107,7 @@ func (e *engine) LoadReader(ctx context.Context, reader io.Reader, name string) 
 // Execute 执行已加载的脚本
 func (e *engine) Execute(ctx context.Context) (any, error) {
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrLuaEngineNotInitialized
 	}
 
 	// 使用 channel 处理超时
@@ -133,7 +133,7 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 // ExecuteString 执行字符串脚本
 func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) {
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrLuaEngineNotInitialized
 	}
 
 	done := make(chan error, 1)
@@ -158,7 +158,7 @@ func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) 
 // ExecuteFile 执行脚本文件
 func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) {
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrLuaEngineNotInitialized
 	}
 
 	done := make(chan error, 1)
@@ -183,7 +183,7 @@ func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) 
 // RegisterGlobal 注册全局变量
 func (e *engine) RegisterGlobal(name string, value any) error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrLuaEngineNotInitialized
 	}
 
 	e.vm.BindStruct(name, value)
@@ -193,7 +193,7 @@ func (e *engine) RegisterGlobal(name string, value any) error {
 // GetGlobal 获取全局变量
 func (e *engine) GetGlobal(name string) (any, error) {
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrLuaEngineNotInitialized
 	}
 
 	lv := e.vm.L.GetGlobal(name)
@@ -203,7 +203,7 @@ func (e *engine) GetGlobal(name string) (any, error) {
 // RegisterFunction 注册全局函数
 func (e *engine) RegisterFunction(name string, fn any) error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrLuaEngineNotInitialized
 	}
 
 	// 类型断言检查是否为 Lua.LGFunction
@@ -218,7 +218,7 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 // CallFunction 调用 Lua 函数
 func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	if !e.initialized {
-		return nil, fmt.Errorf("engine not initialized")
+		return nil, ErrLuaEngineNotInitialized
 	}
 
 	type result struct {
@@ -269,7 +269,7 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 // RegisterModule 注册模块
 func (e *engine) RegisterModule(name string, module any) error {
 	if !e.initialized {
-		return fmt.Errorf("engine not initialized")
+		return ErrLuaEngineNotInitialized
 	}
 
 	if mod, ok := module.(Lua.LGFunction); ok {
