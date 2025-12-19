@@ -5,27 +5,31 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestLuaEngine(t *testing.T) {
 	// 创建引擎
-	engine := NewLuaEngine()
-	defer engine.Destroy()
+	eng, err := newLuaEngine()
+	assert.Nil(t, err)
+	assert.NotNil(t, eng)
+	defer eng.Destroy()
 
 	// 初始化
 	ctx := context.Background()
-	if err := engine.Init(ctx); err != nil {
+	if err = eng.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	// 注册全局变量
-	engine.RegisterGlobal("config", map[string]interface{}{
+	err = eng.RegisterGlobal("config", map[string]interface{}{
 		"host": "localhost",
 		"port": 8080,
 	})
 
 	// 执行脚本
-	result, err := engine.ExecuteString(ctx, `
+	result, err := eng.ExecuteString(ctx, `
     function add(a, b)
         return a + b
     end
@@ -35,7 +39,7 @@ func TestLuaEngine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err = engine.CallFunction(ctx, "add", 10, 20)
+	result, err = eng.CallFunction(ctx, "add", 10, 20)
 	if err != nil {
 		t.Error(err)
 	}

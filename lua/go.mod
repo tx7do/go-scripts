@@ -2,10 +2,15 @@ module github.com/tx7do/go-scripts/lua
 
 go 1.24.0
 
+replace (
+	github.com/tx7do/go-scripts => ../
+)
+
 require (
 	github.com/go-kratos/kratos/v2 v2.9.1
 	github.com/stretchr/testify v1.11.1
 	github.com/tengattack/gluacrypto v0.0.0-20240324200146-54b58c95c255
+	github.com/tx7do/go-scripts v0.0.0-20251130101459-7d0b9ec14f7d
 	github.com/vadv/gopher-lua-libs v0.8.0
 	github.com/yuin/gluamapper v0.0.0-20150323120927-d836955830e7
 	github.com/yuin/gopher-lua v1.1.1

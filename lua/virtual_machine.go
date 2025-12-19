@@ -20,7 +20,7 @@ type virtualMachine struct {
 	F *Lua.LFunction
 }
 
-func NewVirtualMachine() *virtualMachine {
+func newVirtualMachine() *virtualMachine {
 	exec := &virtualMachine{
 		L: luaPool.Borrow(),
 	}
@@ -253,8 +253,8 @@ func (e *virtualMachine) convertFromLValue(lv Lua.LValue) interface{} {
 		}
 		return f64i
 	case *Lua.LTable:
-		maxn := v.MaxN()
-		if maxn == 0 {
+		maxN := v.MaxN()
+		if maxN == 0 {
 			// table
 			ret := make(map[string]interface{})
 			v.ForEach(func(key, value Lua.LValue) {
@@ -264,8 +264,8 @@ func (e *virtualMachine) convertFromLValue(lv Lua.LValue) interface{} {
 			return ret
 		} else {
 			// array
-			ret := make([]interface{}, 0, maxn)
-			for i := 1; i <= maxn; i++ {
+			ret := make([]interface{}, 0, maxN)
+			for i := 1; i <= maxN; i++ {
 				ret = append(ret, e.convertFromLValue(v.RawGetInt(i)))
 			}
 			return ret

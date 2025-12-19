@@ -176,6 +176,8 @@ github.com/technoweenie/multipartstreamer v1.0.1 h1:XRztA5MXiR1TIRHxH2uNxXxaIkKQ
 github.com/technoweenie/multipartstreamer v1.0.1/go.mod h1:jNVxdtShOxzAsukZwTSw6MDx5eUJoiEBsSvzDU9uzog=
 github.com/tengattack/gluacrypto v0.0.0-20240324200146-54b58c95c255 h1:F5kNKVmoh0k2qcR0niqj5zs+p310rFHAZyz03g8m00k=
 github.com/tengattack/gluacrypto v0.0.0-20240324200146-54b58c95c255/go.mod h1:stSpJ0yGGTNigTjOoPd2QkUaZhRxEHcYhCpJUdl1bsQ=
+github.com/tx7do/go-scripts v0.0.0-20251130101459-7d0b9ec14f7d h1:mEjqr65/pDvKuuhlyUocGsu4PRtn1gylTNBHE1XWJ14=
+github.com/tx7do/go-scripts v0.0.0-20251130101459-7d0b9ec14f7d/go.mod h1:DuhiNT1Nxn+DjHWSHFyQ9/h/PKL5az1B2oP93bdBTwc=
 github.com/vadv/gopher-lua-libs v0.8.0 h1:u2GVTj32Wnmu8RpSxeAdlTf9mYZrrm9ALKGYmvnvvZQ=
 github.com/vadv/gopher-lua-libs v0.8.0/go.mod h1:iNYvPoNV6ur7xJj4Uj3hEVebv8Z0/MoeM1igsXQbv8g=
 github.com/yuin/gluamapper v0.0.0-20150323120927-d836955830e7 h1:noHsffKZsNfU38DwcXWEPldrTjIZ8FPNKx8mYMGnqjs=

@@ -2,8 +2,9 @@ package js
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type user struct {
@@ -20,7 +21,7 @@ func (u *user) Token() string {
 }
 
 func TestVirtualMachine_ExecuteString(t *testing.T) {
-	exe := NewVirtualMachine()
+	exe := newVirtualMachine()
 	defer exe.Destroy()
 
 	jsString := `
@@ -60,7 +61,7 @@ func sayHello(msg string) {
 }
 
 func TestVirtualMachine_ExecuteFile(t *testing.T) {
-	exe := NewVirtualMachine()
+	exe := newVirtualMachine()
 	defer exe.Destroy()
 
 	err := exe.LoadFile("./script/test.js")
@@ -89,7 +90,7 @@ func TestVirtualMachine_ExecuteFile(t *testing.T) {
 }
 
 func TestVirtualMachine_DirectExecuteFile(t *testing.T) {
-	exe := NewVirtualMachine()
+	exe := newVirtualMachine()
 	defer exe.Destroy()
 
 	err := exe.ExecuteFile("./script/test_require.js")
@@ -98,7 +99,7 @@ func TestVirtualMachine_DirectExecuteFile(t *testing.T) {
 }
 
 func TestVirtualMachine_Require(t *testing.T) {
-	exe := NewVirtualMachine()
+	exe := newVirtualMachine()
 	defer exe.Destroy()
 
 	const SCRIPT = `

@@ -5,32 +5,36 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestJavascriptEngine(t *testing.T) {
 	// 创建引擎
-	engine := NewJavascriptEngine()
-	defer engine.Destroy()
+	eng, err := newJavascriptEngine()
+	assert.Nil(t, err)
+	assert.NotNil(t, eng)
+	defer eng.Destroy()
 
 	// 初始化
 	ctx := context.Background()
-	if err := engine.Init(ctx); err != nil {
+	if err := eng.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	// 注册全局变量
-	engine.RegisterGlobal("config", map[string]interface{}{
+	eng.RegisterGlobal("config", map[string]interface{}{
 		"host": "localhost",
 		"port": 8080,
 	})
 
 	// 注册函数
-	engine.RegisterFunction("log", func(msg string) {
+	eng.RegisterFunction("log", func(msg string) {
 		fmt.Println("JS Log:", msg)
 	})
 
 	// 执行脚本
-	result, err := engine.ExecuteString(ctx, `
+	result, err := eng.ExecuteString(ctx, `
     function add(a, b) {
         log('Adding ' + a + ' and ' + b);
         return a + b;
@@ -43,7 +47,7 @@ func TestJavascriptEngine(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err = engine.CallFunction(ctx, "add", 100, 200)
+	result, err = eng.CallFunction(ctx, "add", 100, 200)
 	if err != nil {
 		t.Error(err)
 	}

@@ -4,32 +4,39 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 
 	Lua "github.com/yuin/gopher-lua"
+
+	scriptEngine "github.com/tx7do/go-scripts"
 )
 
-// LuaEngine Lua 脚本引擎实现
-type LuaEngine struct {
+func init() {
+	_ = scriptEngine.Register(scriptEngine.LuaType, func() (scriptEngine.Engine, error) {
+		return newLuaEngine()
+	})
+}
+
+// engine Lua 脚本引擎实现
+type engine struct {
 	vm          *virtualMachine
 	initialized bool
 	lastError   error
 }
 
-// NewLuaEngine 创建 Lua 引擎实例
-func NewLuaEngine() *LuaEngine {
-	return &LuaEngine{
+// newLuaEngine 创建 Lua 引擎实例
+func newLuaEngine() (*engine, error) {
+	return &engine{
 		initialized: false,
-	}
+	}, nil
 }
 
 // Init 初始化引擎
-func (e *LuaEngine) Init(ctx context.Context) error {
+func (e *engine) Init(_ context.Context) error {
 	if e.initialized {
 		return fmt.Errorf("engine already initialized")
 	}
 
-	e.vm = NewVirtualMachine()
+	e.vm = newVirtualMachine()
 	e.initialized = true
 	e.lastError = nil
 
@@ -37,7 +44,7 @@ func (e *LuaEngine) Init(ctx context.Context) error {
 }
 
 // Destroy 销毁引擎
-func (e *LuaEngine) Destroy() error {
+func (e *engine) Destroy() error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
@@ -50,12 +57,12 @@ func (e *LuaEngine) Destroy() error {
 }
 
 // IsInitialized 检查是否已初始化
-func (e *LuaEngine) IsInitialized() bool {
+func (e *engine) IsInitialized() bool {
 	return e.initialized
 }
 
 // LoadString 加载字符串脚本
-func (e *LuaEngine) LoadString(ctx context.Context, source string) error {
+func (e *engine) LoadString(_ context.Context, source string) error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
@@ -69,7 +76,7 @@ func (e *LuaEngine) LoadString(ctx context.Context, source string) error {
 }
 
 // LoadFile 加载脚本文件
-func (e *LuaEngine) LoadFile(ctx context.Context, filePath string) error {
+func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
@@ -83,12 +90,12 @@ func (e *LuaEngine) LoadFile(ctx context.Context, filePath string) error {
 }
 
 // LoadReader 从 Reader 加载脚本
-func (e *LuaEngine) LoadReader(ctx context.Context, reader io.Reader, name string) error {
+func (e *engine) LoadReader(ctx context.Context, reader io.Reader, name string) error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
 
-	source, err := ioutil.ReadAll(reader)
+	source, err := io.ReadAll(reader)
 	if err != nil {
 		e.lastError = err
 		return err
@@ -98,7 +105,7 @@ func (e *LuaEngine) LoadReader(ctx context.Context, reader io.Reader, name strin
 }
 
 // Execute 执行已加载的脚本
-func (e *LuaEngine) Execute(ctx context.Context) (interface{}, error) {
+func (e *engine) Execute(ctx context.Context) (any, error) {
 	if !e.initialized {
 		return nil, fmt.Errorf("engine not initialized")
 	}
@@ -124,7 +131,7 @@ func (e *LuaEngine) Execute(ctx context.Context) (interface{}, error) {
 }
 
 // ExecuteString 执行字符串脚本
-func (e *LuaEngine) ExecuteString(ctx context.Context, source string) (interface{}, error) {
+func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) {
 	if !e.initialized {
 		return nil, fmt.Errorf("engine not initialized")
 	}
@@ -149,7 +156,7 @@ func (e *LuaEngine) ExecuteString(ctx context.Context, source string) (interface
 }
 
 // ExecuteFile 执行脚本文件
-func (e *LuaEngine) ExecuteFile(ctx context.Context, filePath string) (interface{}, error) {
+func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) {
 	if !e.initialized {
 		return nil, fmt.Errorf("engine not initialized")
 	}
@@ -174,7 +181,7 @@ func (e *LuaEngine) ExecuteFile(ctx context.Context, filePath string) (interface
 }
 
 // RegisterGlobal 注册全局变量
-func (e *LuaEngine) RegisterGlobal(name string, value interface{}) error {
+func (e *engine) RegisterGlobal(name string, value any) error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
@@ -184,7 +191,7 @@ func (e *LuaEngine) RegisterGlobal(name string, value interface{}) error {
 }
 
 // GetGlobal 获取全局变量
-func (e *LuaEngine) GetGlobal(name string) (interface{}, error) {
+func (e *engine) GetGlobal(name string) (any, error) {
 	if !e.initialized {
 		return nil, fmt.Errorf("engine not initialized")
 	}
@@ -194,7 +201,7 @@ func (e *LuaEngine) GetGlobal(name string) (interface{}, error) {
 }
 
 // RegisterFunction 注册全局函数
-func (e *LuaEngine) RegisterFunction(name string, fn interface{}) error {
+func (e *engine) RegisterFunction(name string, fn any) error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
@@ -209,13 +216,13 @@ func (e *LuaEngine) RegisterFunction(name string, fn interface{}) error {
 }
 
 // CallFunction 调用 Lua 函数
-func (e *LuaEngine) CallFunction(ctx context.Context, name string, args ...interface{}) (interface{}, error) {
+func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	if !e.initialized {
 		return nil, fmt.Errorf("engine not initialized")
 	}
 
 	type result struct {
-		value interface{}
+		value any
 		err   error
 	}
 
@@ -260,7 +267,7 @@ func (e *LuaEngine) CallFunction(ctx context.Context, name string, args ...inter
 }
 
 // RegisterModule 注册模块
-func (e *LuaEngine) RegisterModule(name string, module interface{}) error {
+func (e *engine) RegisterModule(name string, module any) error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
@@ -274,17 +281,17 @@ func (e *LuaEngine) RegisterModule(name string, module interface{}) error {
 }
 
 // GetLastError 获取最后一个错误
-func (e *LuaEngine) GetLastError() error {
+func (e *engine) GetLastError() error {
 	return e.lastError
 }
 
 // ClearError 清除错误
-func (e *LuaEngine) ClearError() {
+func (e *engine) ClearError() {
 	e.lastError = nil
 }
 
 // GetState 获取 Lua 状态机（扩展方法）
-func (e *LuaEngine) GetState() *Lua.LState {
+func (e *engine) GetState() *Lua.LState {
 	if e.vm == nil {
 		return nil
 	}

@@ -16,7 +16,7 @@ type virtualMachine struct {
 	registry *require.Registry
 }
 
-func NewVirtualMachine() *virtualMachine {
+func newVirtualMachine() *virtualMachine {
 	exec := &virtualMachine{
 		vm:       goja.New(),
 		registry: new(require.Registry),

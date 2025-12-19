@@ -4,14 +4,22 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 	"sync"
 
 	"github.com/dop251/goja"
+
+	scriptEngine "github.com/tx7do/go-scripts"
 )
 
-// JavascriptEngine JavaScript 脚本引擎实现
-type JavascriptEngine struct {
+func init() {
+	_ = scriptEngine.Register(scriptEngine.JavaScriptType, func() (scriptEngine.Engine, error) {
+		return newJavascriptEngine()
+	})
+}
+
+// engine JavaScript 脚本引擎实现
+type engine struct {
 	runtime     *goja.Runtime
 	program     *goja.Program
 	initialized bool
@@ -19,15 +27,15 @@ type JavascriptEngine struct {
 	mu          sync.RWMutex
 }
 
-// NewJavascriptEngine 创建 JavaScript 引擎实例
-func NewJavascriptEngine() *JavascriptEngine {
-	return &JavascriptEngine{
+// newJavascriptEngine 创建 JavaScript 引擎实例
+func newJavascriptEngine() (*engine, error) {
+	return &engine{
 		initialized: false,
-	}
+	}, nil
 }
 
 // Init 初始化引擎
-func (e *JavascriptEngine) Init(ctx context.Context) error {
+func (e *engine) Init(_ context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -43,7 +51,7 @@ func (e *JavascriptEngine) Init(ctx context.Context) error {
 }
 
 // Destroy 销毁引擎
-func (e *JavascriptEngine) Destroy() error {
+func (e *engine) Destroy() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -59,14 +67,14 @@ func (e *JavascriptEngine) Destroy() error {
 }
 
 // IsInitialized 检查是否已初始化
-func (e *JavascriptEngine) IsInitialized() bool {
+func (e *engine) IsInitialized() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.initialized
 }
 
 // LoadString 加载字符串脚本
-func (e *JavascriptEngine) LoadString(ctx context.Context, source string) error {
+func (e *engine) LoadString(_ context.Context, source string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -85,7 +93,7 @@ func (e *JavascriptEngine) LoadString(ctx context.Context, source string) error 
 }
 
 // LoadFile 加载脚本文件
-func (e *JavascriptEngine) LoadFile(ctx context.Context, filePath string) error {
+func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -93,7 +101,7 @@ func (e *JavascriptEngine) LoadFile(ctx context.Context, filePath string) error 
 		return fmt.Errorf("engine not initialized")
 	}
 
-	source, err := ioutil.ReadFile(filePath)
+	source, err := os.ReadFile(filePath)
 	if err != nil {
 		e.lastError = err
 		return err
@@ -110,12 +118,12 @@ func (e *JavascriptEngine) LoadFile(ctx context.Context, filePath string) error 
 }
 
 // LoadReader 从 Reader 加载脚本
-func (e *JavascriptEngine) LoadReader(ctx context.Context, reader io.Reader, name string) error {
+func (e *engine) LoadReader(ctx context.Context, reader io.Reader, name string) error {
 	if !e.initialized {
 		return fmt.Errorf("engine not initialized")
 	}
 
-	source, err := ioutil.ReadAll(reader)
+	source, err := io.ReadAll(reader)
 	if err != nil {
 		e.lastError = err
 		return err
@@ -125,7 +133,7 @@ func (e *JavascriptEngine) LoadReader(ctx context.Context, reader io.Reader, nam
 }
 
 // Execute 执行已加载的脚本
-func (e *JavascriptEngine) Execute(ctx context.Context) (interface{}, error) {
+func (e *engine) Execute(ctx context.Context) (interface{}, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -164,7 +172,7 @@ func (e *JavascriptEngine) Execute(ctx context.Context) (interface{}, error) {
 }
 
 // ExecuteString 执行字符串脚本
-func (e *JavascriptEngine) ExecuteString(ctx context.Context, source string) (interface{}, error) {
+func (e *engine) ExecuteString(ctx context.Context, source string) (interface{}, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -199,7 +207,7 @@ func (e *JavascriptEngine) ExecuteString(ctx context.Context, source string) (in
 }
 
 // ExecuteFile 执行脚本文件
-func (e *JavascriptEngine) ExecuteFile(ctx context.Context, filePath string) (interface{}, error) {
+func (e *engine) ExecuteFile(ctx context.Context, filePath string) (interface{}, error) {
 	if err := e.LoadFile(ctx, filePath); err != nil {
 		return nil, err
 	}
@@ -207,7 +215,7 @@ func (e *JavascriptEngine) ExecuteFile(ctx context.Context, filePath string) (in
 }
 
 // RegisterGlobal 注册全局变量
-func (e *JavascriptEngine) RegisterGlobal(name string, value interface{}) error {
+func (e *engine) RegisterGlobal(name string, value interface{}) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -220,7 +228,7 @@ func (e *JavascriptEngine) RegisterGlobal(name string, value interface{}) error 
 }
 
 // GetGlobal 获取全局变量
-func (e *JavascriptEngine) GetGlobal(name string) (interface{}, error) {
+func (e *engine) GetGlobal(name string) (interface{}, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -237,7 +245,7 @@ func (e *JavascriptEngine) GetGlobal(name string) (interface{}, error) {
 }
 
 // RegisterFunction 注册全局函数
-func (e *JavascriptEngine) RegisterFunction(name string, fn interface{}) error {
+func (e *engine) RegisterFunction(name string, fn interface{}) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -250,7 +258,7 @@ func (e *JavascriptEngine) RegisterFunction(name string, fn interface{}) error {
 }
 
 // CallFunction 调用 JavaScript 函数
-func (e *JavascriptEngine) CallFunction(ctx context.Context, name string, args ...interface{}) (interface{}, error) {
+func (e *engine) CallFunction(ctx context.Context, name string, args ...interface{}) (interface{}, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -297,7 +305,7 @@ func (e *JavascriptEngine) CallFunction(ctx context.Context, name string, args .
 }
 
 // RegisterModule 注册模块
-func (e *JavascriptEngine) RegisterModule(name string, module interface{}) error {
+func (e *engine) RegisterModule(name string, module interface{}) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -324,28 +332,28 @@ func (e *JavascriptEngine) RegisterModule(name string, module interface{}) error
 }
 
 // GetLastError 获取最后一个错误
-func (e *JavascriptEngine) GetLastError() error {
+func (e *engine) GetLastError() error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.lastError
 }
 
 // ClearError 清除错误
-func (e *JavascriptEngine) ClearError() {
+func (e *engine) ClearError() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.lastError = nil
 }
 
 // GetRuntime 获取 Goja 运行时（扩展方法）
-func (e *JavascriptEngine) GetRuntime() *goja.Runtime {
+func (e *engine) GetRuntime() *goja.Runtime {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.runtime
 }
 
 // RunProgram 运行已编译的程序（扩展方法）
-func (e *JavascriptEngine) RunProgram(ctx context.Context, program *goja.Program) (goja.Value, error) {
+func (e *engine) RunProgram(ctx context.Context, program *goja.Program) (goja.Value, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
