@@ -2,15 +2,13 @@ module github.com/tx7do/go-scripts/lua
 
 go 1.24.0
 
-replace (
-	github.com/tx7do/go-scripts => ../
-)
+replace github.com/tx7do/go-scripts => ../
 
 require (
-	github.com/go-kratos/kratos/v2 v2.9.1
+	github.com/go-kratos/kratos/v2 v2.9.2
 	github.com/stretchr/testify v1.11.1
 	github.com/tengattack/gluacrypto v0.0.0-20240324200146-54b58c95c255
-	github.com/tx7do/go-scripts v0.0.0-20251130101459-7d0b9ec14f7d
+	github.com/tx7do/go-scripts v0.0.2
 	github.com/vadv/gopher-lua-libs v0.8.0
 	github.com/yuin/gluamapper v0.0.0-20150323120927-d836955830e7
 	github.com/yuin/gopher-lua v1.1.1
@@ -48,10 +46,10 @@ require (
 	github.com/prometheus/procfs v0.19.2 // indirect
 	github.com/technoweenie/multipartstreamer v1.0.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
-	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/xmlpath.v2 v2.0.0-20150820204837-860cbeca3ebc // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
