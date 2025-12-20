@@ -81,7 +81,7 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	}
 
 	if err := e.vm.LoadString(source); err != nil {
-		e.lastError = err
+		e.setLastError(err)
 		return err
 	}
 
@@ -98,7 +98,7 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	}
 
 	if err := e.vm.LoadFile(filePath); err != nil {
-		e.lastError = err
+		e.setLastError(err)
 		return err
 	}
 
@@ -109,7 +109,7 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) error {
 	source, err := io.ReadAll(reader)
 	if err != nil {
-		e.lastError = err
+		e.setLastError(err)
 		return err
 	}
 
@@ -142,18 +142,15 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 
 	select {
 	case <-ctx.Done():
-		e.mu.Lock()
-		e.lastError = ctx.Err()
-		e.mu.Unlock()
+		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
 
 	case err := <-done:
 		if err != nil {
-			e.mu.Lock()
-			e.lastError = err
-			e.mu.Unlock()
+			e.setLastError(err)
 			return nil, err
 		}
+		e.ClearError()
 		return nil, nil
 	}
 }
@@ -184,18 +181,15 @@ func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) 
 
 	select {
 	case <-ctx.Done():
-		e.mu.Lock()
-		e.lastError = ctx.Err()
-		e.mu.Unlock()
+		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
 
 	case err := <-done:
 		if err != nil {
-			e.mu.Lock()
-			e.lastError = err
-			e.mu.Unlock()
+			e.setLastError(err)
 			return nil, err
 		}
+		e.ClearError()
 		return nil, nil
 	}
 }
@@ -225,18 +219,15 @@ func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) 
 
 	select {
 	case <-ctx.Done():
-		e.mu.Lock()
-		e.lastError = ctx.Err()
-		e.mu.Unlock()
+		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
 
 	case err := <-done:
 		if err != nil {
-			e.mu.Lock()
-			e.lastError = err
-			e.mu.Unlock()
+			e.setLastError(err)
 			return nil, err
 		}
+		e.ClearError()
 		return nil, nil
 	}
 }
@@ -330,16 +321,13 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 
 	select {
 	case <-ctx.Done():
-		e.mu.Lock()
-		e.lastError = ctx.Err()
-		e.mu.Unlock()
+		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
 	case res := <-done:
 		if res.err != nil {
-			e.mu.Lock()
-			e.lastError = res.err
-			e.mu.Unlock()
+			e.setLastError(res.err)
 		}
+		e.ClearError()
 		return res.value, res.err
 	}
 }
@@ -367,6 +355,12 @@ func (e *engine) GetLastError() error {
 	defer e.mu.Unlock()
 
 	return e.lastError
+}
+
+func (e *engine) setLastError(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastError = err
 }
 
 // ClearError 清除错误
