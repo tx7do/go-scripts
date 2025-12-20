@@ -27,7 +27,7 @@ type engine struct {
 	lastError   error
 
 	mu     sync.RWMutex // 保护 initialized, program, lastError
-	execMu sync.RWMutex // 保护 runtime 的并发访问（读锁用于运行/调用，写锁用于修改/关闭）
+	execMu sync.Mutex   // 保护 runtime 的并发访问（读锁用于运行/调用，写锁用于修改/关闭）
 }
 
 // newJavascriptEngine 创建 JavaScript 引擎实例
@@ -170,9 +170,9 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			e.execMu.RLock()
+			e.execMu.Lock()
 			rt := e.runtime
-			e.execMu.RUnlock()
+			e.execMu.Unlock()
 			if rt != nil {
 				rt.Interrupt(ctx.Err())
 			}
@@ -180,10 +180,10 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 		}
 	}()
 
-	e.execMu.RLock()
+	e.execMu.Lock()
 	rt := e.runtime
 	if rt == nil {
-		e.execMu.RUnlock()
+		e.execMu.Unlock()
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
 	}
@@ -192,7 +192,7 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 	if err == nil && val != nil {
 		result = val.Export()
 	}
-	e.execMu.RUnlock()
+	e.execMu.Unlock()
 
 	if err != nil {
 		e.setLastError(err)
@@ -220,9 +220,9 @@ func (e *engine) ExecuteString(ctx context.Context, src string) (any, error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			e.execMu.RLock()
+			e.execMu.Lock()
 			rt := e.runtime
-			e.execMu.RUnlock()
+			e.execMu.Unlock()
 			if rt != nil {
 				rt.Interrupt(ctx.Err())
 			}
@@ -296,21 +296,21 @@ func (e *engine) GetGlobal(name string) (any, error) {
 	}
 	e.mu.RUnlock()
 
-	e.execMu.RLock()
+	e.execMu.Lock()
 	if e.runtime == nil {
-		e.execMu.RUnlock()
+		e.execMu.Unlock()
 		e.setLastError(ErrJavascriptRuntimeNotInitialized)
 		return nil, ErrJavascriptRuntimeNotInitialized
 	}
 	val := e.runtime.Get(name)
 	if val == nil {
-		e.execMu.RUnlock()
+		e.execMu.Unlock()
 		err := fmt.Errorf("global variable %s not found", name)
 		e.setLastError(err)
 		return nil, err
 	}
 	result := val.Export()
-	e.execMu.RUnlock()
+	e.execMu.Unlock()
 
 	e.ClearError()
 
@@ -358,9 +358,9 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 	go func() {
 		select {
 		case <-ctx.Done():
-			e.execMu.RLock()
+			e.execMu.Lock()
 			rt := e.runtime
-			e.execMu.RUnlock()
+			e.execMu.Unlock()
 			if rt != nil {
 				rt.Interrupt(ctx.Err())
 			}
@@ -475,8 +475,8 @@ func (e *engine) getRuntimeUnsafe() *goja.Runtime {
 // 回调在持锁期间执行，返回值直接传出，避免将 *goja.Runtime 或 goja.Value
 // 在释放锁后暴露给外部导致的并发问题。
 func (e *engine) withRuntime(fn func(rt *goja.Runtime) (any, error)) (any, error) {
-	e.execMu.RLock()
-	defer e.execMu.RUnlock()
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
 	if e.runtime == nil {
 		return nil, ErrJavascriptRuntimeNotInitialized
 	}
@@ -499,9 +499,9 @@ func (e *engine) RunProgram(ctx context.Context, program *goja.Program) (any, er
 	go func() {
 		select {
 		case <-ctx.Done():
-			e.execMu.RLock()
+			e.execMu.Lock()
 			rt := e.runtime
-			e.execMu.RUnlock()
+			e.execMu.Unlock()
 			if rt != nil {
 				rt.Interrupt(ctx.Err())
 			}
