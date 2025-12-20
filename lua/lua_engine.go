@@ -22,7 +22,9 @@ type engine struct {
 	vm          *virtualMachine
 	initialized bool
 	lastError   error
-	mu          sync.Mutex
+
+	mu          sync.RWMutex
+	lastErrorMu sync.Mutex
 }
 
 // newLuaEngine 创建 Lua 引擎实例
@@ -38,12 +40,13 @@ func (e *engine) Init(_ context.Context) error {
 	defer e.mu.Unlock()
 
 	if e.initialized {
+		e.setLastError(ErrLuaEngineAlreadyInitialized)
 		return ErrLuaEngineAlreadyInitialized
 	}
 
 	e.vm = newVirtualMachine()
 	e.initialized = true
-	e.lastError = nil
+	e.ClearError()
 
 	return nil
 }
@@ -54,6 +57,7 @@ func (e *engine) Close() error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return ErrLuaEngineNotInitialized
 	}
 
@@ -66,8 +70,8 @@ func (e *engine) Close() error {
 
 // IsInitialized 检查是否已初始化
 func (e *engine) IsInitialized() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.initialized
 }
 
@@ -77,6 +81,7 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return ErrLuaEngineNotInitialized
 	}
 
@@ -84,6 +89,8 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 		e.setLastError(err)
 		return err
 	}
+
+	e.ClearError()
 
 	return nil
 }
@@ -94,6 +101,7 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return ErrLuaEngineNotInitialized
 	}
 
@@ -101,6 +109,8 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 		e.setLastError(err)
 		return err
 	}
+
+	e.ClearError()
 
 	return nil
 }
@@ -118,12 +128,10 @@ func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) err
 
 // Execute 执行已加载的脚本
 func (e *engine) Execute(ctx context.Context) (any, error) {
-	e.mu.Lock()
-	if !e.initialized {
-		e.mu.Unlock()
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
 	}
-	e.mu.Unlock()
 
 	// 使用 channel 处理超时
 	done := make(chan error, 1)
@@ -157,13 +165,10 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 
 // ExecuteString 执行字符串脚本
 func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) {
-	// 先用锁检查 initialized，避免竞态
-	e.mu.Lock()
-	if !e.initialized {
-		e.mu.Unlock()
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
 	}
-	e.mu.Unlock()
 
 	done := make(chan error, 1)
 
@@ -196,12 +201,10 @@ func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) 
 
 // ExecuteFile 执行脚本文件
 func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) {
-	e.mu.Lock()
-	if !e.initialized {
-		e.mu.Unlock()
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
 	}
-	e.mu.Unlock()
 
 	done := make(chan error, 1)
 
@@ -238,24 +241,30 @@ func (e *engine) RegisterGlobal(name string, value any) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return ErrLuaEngineNotInitialized
 	}
 
 	e.vm.BindStruct(name, value)
+
+	e.ClearError()
 	return nil
 }
 
 // GetGlobal 获取全局变量
 func (e *engine) GetGlobal(name string) (any, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 
 	if !e.initialized {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
 	}
 
 	lv := e.vm.L.GetGlobal(name)
-	return e.vm.convertFromLValue(lv), nil
+	result := e.vm.convertFromLValue(lv)
+	e.ClearError()
+	return result, nil
 }
 
 // RegisterFunction 注册全局函数
@@ -264,20 +273,29 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return ErrLuaEngineNotInitialized
 	}
 
 	// 类型断言检查是否为 Lua.LGFunction
 	if lf, ok := fn.(Lua.LGFunction); ok {
 		e.vm.RegisterFunction(name, lf)
+		e.ClearError()
 		return nil
 	}
 
-	return fmt.Errorf("function must be of type Lua.LGFunction")
+	err := fmt.Errorf("function must be of type Lua.LGFunction")
+	e.setLastError(err)
+	return err
 }
 
 // CallFunction 调用 Lua 函数
 func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return nil, ErrLuaEngineNotInitialized
+	}
+
 	type result struct {
 		value any
 		err   error
@@ -323,9 +341,11 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 	case <-ctx.Done():
 		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
+
 	case res := <-done:
 		if res.err != nil {
 			e.setLastError(res.err)
+			return res.value, res.err
 		}
 		e.ClearError()
 		return res.value, res.err
@@ -338,35 +358,39 @@ func (e *engine) RegisterModule(name string, module any) error {
 	defer e.mu.Unlock()
 
 	if !e.initialized {
+		e.setLastError(ErrLuaEngineNotInitialized)
 		return ErrLuaEngineNotInitialized
 	}
 
 	if mod, ok := module.(Lua.LGFunction); ok {
 		e.vm.RegisterModule(name, mod)
+		e.ClearError()
 		return nil
 	}
 
-	return fmt.Errorf("module must be of type Lua.LGFunction")
+	err := fmt.Errorf("module must be of type Lua.LGFunction")
+	e.setLastError(err)
+	return err
 }
 
 // GetLastError 获取最后一个错误
 func (e *engine) GetLastError() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.lastErrorMu.Lock()
+	defer e.lastErrorMu.Unlock()
 
 	return e.lastError
 }
 
 func (e *engine) setLastError(err error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.lastErrorMu.Lock()
+	defer e.lastErrorMu.Unlock()
 	e.lastError = err
 }
 
 // ClearError 清除错误
 func (e *engine) ClearError() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.lastErrorMu.Lock()
+	defer e.lastErrorMu.Unlock()
 
 	e.lastError = nil
 }

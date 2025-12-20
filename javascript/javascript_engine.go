@@ -26,8 +26,9 @@ type engine struct {
 	initialized bool
 	lastError   error
 
-	mu     sync.RWMutex // 保护 initialized, program, lastError
-	execMu sync.Mutex   // 保护 runtime 的并发访问（读锁用于运行/调用，写锁用于修改/关闭）
+	mu          sync.RWMutex // 保护 initialized, program, lastError
+	execMu      sync.Mutex   // 保护 runtime 的并发访问（读锁用于运行/调用，写锁用于修改/关闭）
+	lastErrorMu sync.RWMutex
 }
 
 // newJavascriptEngine 创建 JavaScript 引擎实例
@@ -447,21 +448,21 @@ func (e *engine) RegisterModule(name string, module any) error {
 
 // GetLastError 获取最后一个错误
 func (e *engine) GetLastError() error {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.lastErrorMu.RLock()
+	defer e.lastErrorMu.RUnlock()
 	return e.lastError
 }
 
 func (e *engine) setLastError(err error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.lastErrorMu.Lock()
+	defer e.lastErrorMu.Unlock()
 	e.lastError = err
 }
 
 // ClearError 清除错误
 func (e *engine) ClearError() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.lastErrorMu.Lock()
+	defer e.lastErrorMu.Unlock()
 	e.lastError = nil
 }
 
