@@ -37,25 +37,33 @@ func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEngineP
 		max:   maxSize,
 	}
 
-	// 预创建 initialSize 个实例
+	// 先全部创建并初始化到切片中，失败时统一清理
+	created := make([]Engine, 0, initialSize)
 	for i := 0; i < initialSize; i++ {
 		eng, err := NewScriptEngine(typ)
 		if err != nil {
-			// 清理已创建的
-		Drain:
-			for {
-				select {
-				case e := <-p.pool:
-					_ = e.Close()
-				default:
-					break Drain
-				}
+			for _, e := range created {
+				_ = e.Close()
 			}
 			return nil, fmt.Errorf("script engine: factory failed: %w", err)
 		}
-		p.pool <- eng
-		p.total++
+
+		if initErr := eng.Init(context.Background()); initErr != nil {
+			_ = eng.Close()
+			for _, e := range created {
+				_ = e.Close()
+			}
+			return nil, fmt.Errorf("script engine: init failed: %w", initErr)
+		}
+
+		created = append(created, eng)
 	}
+
+	// 全部创建并初始化成功后再放入通道并设置 total
+	for _, e := range created {
+		p.pool <- e
+	}
+	p.total = len(created)
 
 	return p, nil
 }
@@ -89,14 +97,26 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 			p.mu.Unlock()
 			return nil, err
 		}
+
+		// 初始化引擎
+		if initErr := eng.Init(context.Background()); initErr != nil {
+			_ = eng.Close()
+			p.mu.Lock()
+			p.total--
+			p.mu.Unlock()
+			return nil, initErr
+		}
+
 		return eng, nil
 	}
 	// 已到上限，必须阻塞等待空闲实例
 	p.mu.Unlock()
+
 	eng, ok := <-p.pool
 	if !ok {
 		return nil, errors.New("script engine: engine pool closed")
 	}
+
 	return eng, nil
 }
 

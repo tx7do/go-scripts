@@ -40,8 +40,21 @@ func NewEnginePool(size int, typ Type) (*EnginePool, error) {
 			}
 			return nil, fmt.Errorf("factory failed: %w", err)
 		}
+
+		// 调用 Init，失败则清理并返回
+		if initErr := eng.Init(context.Background()); initErr != nil {
+			_ = eng.Close()
+			for _, e := range created {
+				_ = e.Close()
+			}
+			return nil, fmt.Errorf("init failed: %w", initErr)
+		}
+
 		created = append(created, eng)
-		p.pool <- eng
+	}
+
+	for _, e := range created {
+		p.pool <- e
 	}
 
 	return p, nil
@@ -121,13 +134,34 @@ func (p *EnginePool) IsClosed() bool {
 // 以下为常见包装方法：自动 acquire -> 调用 -> release。
 // 若项目的 Engine 接口有所不同，可按需增减/调整。
 
-func (p *EnginePool) InitAll(_ context.Context) error {
-	eng, err := p.Acquire()
-	if err != nil {
-		return err
+func (p *EnginePool) InitAll(ctx context.Context) error {
+	// 尝试获取池中所有实例
+	engines := make([]Engine, 0, p.size)
+	for i := 0; i < p.size; i++ {
+		eng, err := p.Acquire()
+		if err != nil {
+			for _, e := range engines {
+				_ = e.Close()
+			}
+			return err
+		}
+		engines = append(engines, eng)
 	}
-	p.Release(eng)
-	// 若需要对所有子 engine 执行 Init，外部可直接调用 factory 初始化时已完成。
+
+	// 对每个实例执行 Init()
+	for _, eng := range engines {
+		if err := eng.Init(ctx); err != nil {
+			for _, e := range engines {
+				_ = e.Close()
+			}
+			return fmt.Errorf("init failed: %w", err)
+		}
+	}
+
+	// 释放回池
+	for _, eng := range engines {
+		p.Release(eng)
+	}
 	return nil
 }
 
