@@ -18,8 +18,60 @@
 
 ## 快速开始
 
-1. 克隆仓库：
-    ```bash
-    git clone https://github.com/tx7do/go-scripts.git
-    cd go-scripts
-    ```
+### 1. 克隆仓库：
+
+```bash
+git clone https://github.com/tx7do/go-scripts.git
+cd go-scripts
+```
+
+### 2. 安装依赖：
+
+```bash
+go mod tidy
+```
+
+## 使用JavaScript脚本引擎
+
+```go
+import (
+	_ "github.com/tx7do/go-scripts/javascript"
+	"github.com/tx7do/go-scripts"
+)
+
+// 初始化支持JavaScript的自动扩容引擎池（初始2个实例，最大10个）
+enginePool, err := script_engine.NewAutoGrowEnginePool(2, 10, script_engine.JavaScriptType)
+if err != nil {
+    // 处理初始化错误
+}
+defer enginePool.Close()
+
+// 定义Go中的业务函数
+func updateUserStatus(userId int64, status string) error {
+    // 实际更新用户状态的业务逻辑
+return nil
+}
+
+// 注册到脚本引擎，供JavaScript调用
+err := enginePool.RegisterFunction("updateUserStatus", updateUserStatus)
+if err != nil {
+    // 处理注册错误
+}
+```
+
+
+## 使用Lua脚本引擎
+
+```go
+import (
+	_ "github.com/tx7do/go-scripts/javascript"
+	"github.com/tx7do/go-scripts"
+)
+
+// 初始化支持JavaScript的自动扩容引擎池（初始2个实例，最大10个）
+enginePool, err := script_engine.NewAutoGrowEnginePool(2, 10, script_engine.LuaType)
+if err != nil {
+// 处理初始化错误
+}
+defer enginePool.Close()
+```
