@@ -42,10 +42,16 @@ func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEngineP
 		eng, err := NewScriptEngine(typ)
 		if err != nil {
 			// 清理已创建的
-			for e := range p.pool {
-				_ = e.Close()
+		Drain:
+			for {
+				select {
+				case e := <-p.pool:
+					_ = e.Close()
+				default:
+					break Drain
+				}
 			}
-			return nil, fmt.Errorf("factory failed: %w", err)
+			return nil, fmt.Errorf("script engine: factory failed: %w", err)
 		}
 		p.pool <- eng
 		p.total++
@@ -59,7 +65,7 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return nil, errors.New("engine pool closed")
+		return nil, errors.New("script engine: engine pool closed")
 	}
 	p.mu.Unlock()
 
@@ -89,7 +95,7 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 	p.mu.Unlock()
 	eng, ok := <-p.pool
 	if !ok {
-		return nil, errors.New("engine pool closed")
+		return nil, errors.New("script engine: engine pool closed")
 	}
 	return eng, nil
 }
