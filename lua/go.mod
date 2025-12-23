@@ -8,7 +8,7 @@ require (
 	github.com/go-kratos/kratos/v2 v2.9.2
 	github.com/stretchr/testify v1.11.1
 	github.com/tengattack/gluacrypto v0.0.0-20240324200146-54b58c95c255
-	github.com/tx7do/go-scripts v0.0.4
+	github.com/tx7do/go-scripts v0.0.5
 	github.com/vadv/gopher-lua-libs v0.8.0
 	github.com/yuin/gluamapper v0.0.0-20150323120927-d836955830e7
 	github.com/yuin/gopher-lua v1.1.1
