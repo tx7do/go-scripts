@@ -5,11 +5,14 @@ import "time"
 type Type string
 
 const (
-	// LuaType Lua 脚本引擎类型
+	// LuaType Lua Script Engine Type
 	LuaType Type = "lua"
 
-	// JavaScriptType JavaScript 脚本引擎类型
+	// JavaScriptType JavaScript Script Engine Type
 	JavaScriptType Type = "javascript"
+
+	// PythonType Python Script Engine Type
+	PythonType Type = "python"
 )
 
 // CallResult 函数调用结果
