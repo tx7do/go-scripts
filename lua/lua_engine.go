@@ -34,6 +34,10 @@ func newLuaEngine() (*engine, error) {
 	}, nil
 }
 
+func (e *engine) GetType() scriptEngine.Type {
+	return scriptEngine.LuaType
+}
+
 // Init 初始化引擎
 func (e *engine) Init(_ context.Context) error {
 	e.mu.Lock()

@@ -38,6 +38,10 @@ func newJavascriptEngine() (*engine, error) {
 	}, nil
 }
 
+func (e *engine) GetType() scriptEngine.Type {
+	return scriptEngine.JavaScriptType
+}
+
 // Init 初始化引擎
 func (e *engine) Init(_ context.Context) error {
 	newRt := goja.New()

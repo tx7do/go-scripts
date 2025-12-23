@@ -8,7 +8,7 @@ require (
 	github.com/dop251/goja v0.0.0-20251201205617-2bb4c724c0f9
 	github.com/dop251/goja_nodejs v0.0.0-20251015164255-5e94316bedaf
 	github.com/stretchr/testify v1.11.1
-	github.com/tx7do/go-scripts v0.0.3
+	github.com/tx7do/go-scripts v0.0.4
 )
 
 require (
