@@ -19,16 +19,22 @@ func init() {
 }
 
 // engine JavaScript 脚本引擎实现
+//
+// 锁使用约定：
+// - 总是先获取 `mu`（或 `mu` 的写锁），然后再获取 `execMu`。
+// - 释放顺序与获取顺序相反（先释放 `execMu`，再释放 `mu`）。
+// - 不要在持有 `execMu` 的情况下再去获取 `mu`，以避免死锁。
+// 该约定用于保护 runtime / programs / initialized 等状态的一致性。
 type engine struct {
-	runtime *goja.Runtime
-	program *goja.Program
+	runtime  *goja.Runtime   // JavaScript 运行时
+	programs []*goja.Program // 已编译的程序列表
 
 	initialized bool
 	lastError   error
 
-	mu          sync.RWMutex // 保护 initialized, program, lastError
-	execMu      sync.Mutex   // 保护 runtime 的并发访问（读锁用于运行/调用，写锁用于修改/关闭）
-	lastErrorMu sync.RWMutex
+	mu          sync.RWMutex // 保护 initialized, programs
+	execMu      sync.Mutex   // 保护 runtime
+	lastErrorMu sync.RWMutex // 保护 lastError
 }
 
 // newJavascriptEngine 创建 JavaScript 引擎实例
@@ -47,18 +53,20 @@ func (e *engine) Init(_ context.Context) error {
 	newRt := goja.New()
 
 	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if e.initialized {
-		e.mu.Unlock()
 		e.setLastError(ErrJavascriptEngineAlreadyInitialized)
 		return ErrJavascriptEngineAlreadyInitialized
 	}
+
 	e.execMu.Lock()
+	defer e.execMu.Unlock()
+
 	e.runtime = newRt
-	e.execMu.Unlock()
 
 	e.initialized = true
 	e.lastError = nil
-	e.mu.Unlock()
 
 	return nil
 }
@@ -66,20 +74,33 @@ func (e *engine) Init(_ context.Context) error {
 // Close 销毁引擎
 func (e *engine) Close() error {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if !e.initialized {
-		e.mu.Unlock()
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return ErrJavascriptEngineNotInitialized
 	}
-	e.initialized = false
-	e.mu.Unlock()
 
 	e.execMu.Lock()
+	defer e.execMu.Unlock()
+
+	e.initialized = false
 	e.runtime = nil
-	e.program = nil
-	e.execMu.Unlock()
+	e.programs = nil
+
+	e.lastErrorMu.Lock()
+	e.lastError = nil
+	e.lastErrorMu.Unlock()
 
 	return nil
+}
+
+// ClearPrograms 清空已缓存的已编译程序
+func (e *engine) ClearPrograms() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	//e.program = nil
+	e.programs = nil
 }
 
 // IsInitialized 检查是否已初始化
@@ -91,10 +112,7 @@ func (e *engine) IsInitialized() bool {
 
 // LoadString 加载字符串脚本
 func (e *engine) LoadString(_ context.Context, source string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if !e.initialized {
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return ErrJavascriptEngineNotInitialized
 	}
@@ -105,17 +123,21 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 		return err
 	}
 
-	e.program = program
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.initialized {
+		e.setLastError(ErrJavascriptEngineNotInitialized)
+		return ErrJavascriptEngineNotInitialized
+	}
+	e.programs = append(e.programs, program)
+
 	e.ClearError()
 	return nil
 }
 
 // LoadFile 加载脚本文件
 func (e *engine) LoadFile(_ context.Context, filePath string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if !e.initialized {
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return ErrJavascriptEngineNotInitialized
 	}
@@ -132,7 +154,14 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 		return err
 	}
 
-	e.program = program
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.initialized {
+		e.setLastError(ErrJavascriptEngineNotInitialized)
+		return ErrJavascriptEngineNotInitialized
+	}
+	e.programs = append(e.programs, program)
+
 	e.ClearError()
 	return nil
 }
@@ -153,71 +182,72 @@ func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) err
 	return e.LoadString(ctx, string(source))
 }
 
-// Execute 执行已加载的脚本
-func (e *engine) Execute(ctx context.Context) (any, error) {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
+	for _, source := range sources {
+		if err := e.LoadString(ctx, source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
+	for _, filePath := range filePaths {
+		if err := e.LoadFile(ctx, filePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// executeProgram 执行已编译的程序
+func (e *engine) executeProgram(ctx context.Context, program *goja.Program) (any, error) {
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
 	}
-	if e.program == nil {
-		e.mu.RUnlock()
+
+	return e.RunProgram(ctx, program)
+}
+
+// ExecuteLoaded 执行已加载的脚本
+func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
+	if !e.IsInitialized() {
+		e.setLastError(ErrJavascriptEngineNotInitialized)
+		return nil, ErrJavascriptEngineNotInitialized
+	}
+
+	// 复制 programs 引用，避免执行期间被修改
+	e.mu.RLock()
+	progs := make([]*goja.Program, len(e.programs))
+	copy(progs, e.programs)
+	e.mu.RUnlock()
+
+	if len(progs) == 0 {
 		e.setLastError(ErrJavascriptNoProgramLoaded)
 		return nil, ErrJavascriptNoProgramLoaded
 	}
-	prog := e.program
-	e.mu.RUnlock()
 
-	done := make(chan struct{})
-	defer close(done)
-
-	go func() {
-		select {
-		case <-ctx.Done():
-			e.execMu.Lock()
-			rt := e.runtime
-			e.execMu.Unlock()
-			if rt != nil {
-				rt.Interrupt(ctx.Err())
-			}
-		case <-done:
+	results := make([]any, 0, len(progs))
+	for _, p := range progs {
+		res, err := e.RunProgram(ctx, p)
+		if err != nil {
+			// RunProgram 已设置 lastError
+			return nil, err
 		}
-	}()
-
-	e.execMu.Lock()
-	rt := e.runtime
-	if rt == nil {
-		e.execMu.Unlock()
-		e.setLastError(ErrJavascriptEngineNotInitialized)
-		return nil, ErrJavascriptEngineNotInitialized
-	}
-	val, err := rt.RunProgram(prog)
-	var result any
-	if err == nil && val != nil {
-		result = val.Export()
-	}
-	e.execMu.Unlock()
-
-	if err != nil {
-		e.setLastError(err)
-		return nil, err
+		results = append(results, res)
 	}
 
 	e.ClearError()
-
-	return result, nil
+	return results, nil
 }
 
 // ExecuteString 执行字符串脚本
 func (e *engine) ExecuteString(ctx context.Context, src string) (any, error) {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
 	}
-	e.mu.RUnlock()
 
 	done := make(chan struct{})
 	defer close(done)
@@ -264,58 +294,86 @@ func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) 
 	if err := e.LoadFile(ctx, filePath); err != nil {
 		return nil, err
 	}
-	return e.Execute(ctx)
+
+	// ExecuteLoaded 返回一个结果切片（以 any 返回），兼容性处理末尾结果
+	resAny, err := e.ExecuteLoaded(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if arr, ok := resAny.([]any); ok {
+		if len(arr) == 0 {
+			return nil, nil
+		}
+		return arr[len(arr)-1], nil
+	}
+	return resAny, nil
 }
 
 // RegisterGlobal 注册全局变量
 func (e *engine) RegisterGlobal(name string, value any) error {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return ErrJavascriptEngineNotInitialized
 	}
-	e.mu.RUnlock()
 
 	e.execMu.Lock()
+	defer e.execMu.Unlock()
 	if e.runtime == nil {
-		e.execMu.Unlock()
-		e.setLastError(ErrJavascriptEngineNotInitialized)
-		return ErrJavascriptEngineNotInitialized
+		e.setLastError(ErrJavascriptRuntimeNotInitialized)
+		return ErrJavascriptRuntimeNotInitialized
 	}
 	_ = e.runtime.Set(name, value)
-	e.execMu.Unlock()
 
 	e.ClearError()
 
 	return nil
 }
 
+func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
+	results := make([]any, 0, len(sources))
+	for _, src := range sources {
+		res, err := e.ExecuteString(ctx, src)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
+func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
+	results := make([]any, 0, len(filePaths))
+	for _, filePath := range filePaths {
+		res, err := e.ExecuteFile(ctx, filePath)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
 // GetGlobal 获取全局变量
 func (e *engine) GetGlobal(name string) (any, error) {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
 	}
-	e.mu.RUnlock()
 
 	e.execMu.Lock()
+	defer e.execMu.Unlock()
 	if e.runtime == nil {
-		e.execMu.Unlock()
 		e.setLastError(ErrJavascriptRuntimeNotInitialized)
 		return nil, ErrJavascriptRuntimeNotInitialized
 	}
 	val := e.runtime.Get(name)
 	if val == nil {
-		e.execMu.Unlock()
 		err := fmt.Errorf("global variable %s not found", name)
 		e.setLastError(err)
 		return nil, err
 	}
 	result := val.Export()
-	e.execMu.Unlock()
 
 	e.ClearError()
 
@@ -324,23 +382,19 @@ func (e *engine) GetGlobal(name string) (any, error) {
 
 // RegisterFunction 注册全局函数
 func (e *engine) RegisterFunction(name string, fn any) error {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return ErrJavascriptEngineNotInitialized
 	}
-	e.mu.RUnlock()
 
 	e.execMu.Lock()
+	defer e.execMu.Unlock()
 	if e.runtime == nil {
-		e.execMu.Unlock()
 		e.setLastError(ErrJavascriptRuntimeNotInitialized)
 		return ErrJavascriptRuntimeNotInitialized
 	}
 
 	_ = e.runtime.Set(name, fn)
-	e.execMu.Unlock()
 
 	e.ClearError()
 
@@ -349,13 +403,10 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 
 // CallFunction 调用 JavaScript 函数
 func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
 	}
-	e.mu.RUnlock()
 
 	done := make(chan struct{})
 	defer close(done)
@@ -419,17 +470,14 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 
 // RegisterModule 注册模块
 func (e *engine) RegisterModule(name string, module any) error {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return ErrJavascriptEngineNotInitialized
 	}
-	e.mu.RUnlock()
 
 	e.execMu.Lock()
+	defer e.execMu.Unlock()
 	if e.runtime == nil {
-		e.execMu.Unlock()
 		e.setLastError(ErrJavascriptRuntimeNotInitialized)
 		return ErrJavascriptRuntimeNotInitialized
 	}
@@ -443,7 +491,6 @@ func (e *engine) RegisterModule(name string, module any) error {
 	} else {
 		_ = e.runtime.Set(name, module)
 	}
-	e.execMu.Unlock()
 
 	e.ClearError()
 
@@ -470,15 +517,7 @@ func (e *engine) ClearError() {
 	e.lastError = nil
 }
 
-// getRuntimeUnsafe 返回底层 *goja.Runtime（不安全）
-// 调用者必须先获得 execMu 的适当锁（读或写），否则会导致并发问题。
-func (e *engine) getRuntimeUnsafe() *goja.Runtime {
-	return e.runtime
-}
-
-// withRuntime 提供一个在持 e.execMu 读锁下访问 runtime 的安全回调方式。
-// 回调在持锁期间执行，返回值直接传出，避免将 *goja.Runtime 或 goja.Value
-// 在释放锁后暴露给外部导致的并发问题。
+// withRuntime 在受保护的环境中使用 runtime 执行函数
 func (e *engine) withRuntime(fn func(rt *goja.Runtime) (any, error)) (any, error) {
 	e.execMu.Lock()
 	defer e.execMu.Unlock()
@@ -490,13 +529,10 @@ func (e *engine) withRuntime(fn func(rt *goja.Runtime) (any, error)) (any, error
 
 // RunProgram 运行已编译的程序
 func (e *engine) RunProgram(ctx context.Context, program *goja.Program) (any, error) {
-	e.mu.RLock()
-	if !e.initialized {
-		e.mu.RUnlock()
+	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
 	}
-	e.mu.RUnlock()
 
 	done := make(chan struct{})
 	defer close(done)

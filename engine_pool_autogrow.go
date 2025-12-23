@@ -206,13 +206,31 @@ func (p *AutoGrowEnginePool) LoadReader(ctx context.Context, reader io.Reader, n
 	return eng.LoadReader(ctx, reader, name)
 }
 
-func (p *AutoGrowEnginePool) Execute(ctx context.Context) (any, error) {
+func (p *AutoGrowEnginePool) LoadStrings(ctx context.Context, sources []string) error {
+	eng, err := p.Acquire()
+	if err != nil {
+		return err
+	}
+	defer p.Release(eng)
+	return eng.LoadStrings(ctx, sources)
+}
+
+func (p *AutoGrowEnginePool) LoadFiles(ctx context.Context, filePaths []string) error {
+	eng, err := p.Acquire()
+	if err != nil {
+		return err
+	}
+	defer p.Release(eng)
+	return eng.LoadFiles(ctx, filePaths)
+}
+
+func (p *AutoGrowEnginePool) ExecuteLoaded(ctx context.Context) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
 		return nil, err
 	}
 	defer p.Release(eng)
-	return eng.Execute(ctx)
+	return eng.ExecuteLoaded(ctx)
 }
 
 func (p *AutoGrowEnginePool) ExecuteString(ctx context.Context, source string) (any, error) {
@@ -231,6 +249,24 @@ func (p *AutoGrowEnginePool) ExecuteFile(ctx context.Context, filePath string) (
 	}
 	defer p.Release(eng)
 	return eng.ExecuteFile(ctx, filePath)
+}
+
+func (p *AutoGrowEnginePool) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
+	eng, err := p.Acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer p.Release(eng)
+	return eng.ExecuteStrings(ctx, sources)
+}
+
+func (p *AutoGrowEnginePool) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
+	eng, err := p.Acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer p.Release(eng)
+	return eng.ExecuteFiles(ctx, filePaths)
 }
 
 func (p *AutoGrowEnginePool) RegisterGlobal(name string, value any) error {

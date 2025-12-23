@@ -192,13 +192,31 @@ func (p *EnginePool) LoadReader(ctx context.Context, reader io.Reader, name stri
 	return eng.LoadReader(ctx, reader, name)
 }
 
-func (p *EnginePool) Execute(ctx context.Context) (any, error) {
+func (p *EnginePool) LoadStrings(ctx context.Context, sources []string) error {
+	eng, err := p.Acquire()
+	if err != nil {
+		return err
+	}
+	defer p.Release(eng)
+	return eng.LoadStrings(ctx, sources)
+}
+
+func (p *EnginePool) LoadFiles(ctx context.Context, filePaths []string) error {
+	eng, err := p.Acquire()
+	if err != nil {
+		return err
+	}
+	defer p.Release(eng)
+	return eng.LoadFiles(ctx, filePaths)
+}
+
+func (p *EnginePool) ExecuteLoaded(ctx context.Context) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
 		return nil, err
 	}
 	defer p.Release(eng)
-	return eng.Execute(ctx)
+	return eng.ExecuteLoaded(ctx)
 }
 
 func (p *EnginePool) ExecuteString(ctx context.Context, source string) (any, error) {
@@ -217,6 +235,24 @@ func (p *EnginePool) ExecuteFile(ctx context.Context, filePath string) (any, err
 	}
 	defer p.Release(eng)
 	return eng.ExecuteFile(ctx, filePath)
+}
+
+func (p *EnginePool) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
+	eng, err := p.Acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer p.Release(eng)
+	return eng.ExecuteStrings(ctx, sources)
+}
+
+func (p *EnginePool) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
+	eng, err := p.Acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer p.Release(eng)
+	return eng.ExecuteFiles(ctx, filePaths)
 }
 
 func (p *EnginePool) RegisterGlobal(name string, value any) error {

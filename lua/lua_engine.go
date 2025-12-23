@@ -99,6 +99,24 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	return nil
 }
 
+func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
+	for _, source := range sources {
+		if err := e.LoadString(ctx, source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
+	for _, filePath := range filePaths {
+		if err := e.LoadFile(ctx, filePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // LoadFile 加载脚本文件
 func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	e.mu.Lock()
@@ -130,8 +148,8 @@ func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) err
 	return e.LoadString(ctx, string(source))
 }
 
-// Execute 执行已加载的脚本
-func (e *engine) Execute(ctx context.Context) (any, error) {
+// ExecuteLoaded 执行已加载的脚本
+func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
@@ -165,6 +183,30 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 		e.ClearError()
 		return nil, nil
 	}
+}
+
+func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
+	var results []any
+	for _, source := range sources {
+		result, err := e.ExecuteString(ctx, source)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
+	var results []any
+	for _, filePath := range filePaths {
+		result, err := e.ExecuteFile(ctx, filePath)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, nil
 }
 
 // ExecuteString 执行字符串脚本

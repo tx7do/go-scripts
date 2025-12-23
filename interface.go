@@ -27,8 +27,12 @@ type Engine interface {
 
 	// LoadString load script from string source
 	LoadString(ctx context.Context, source string) error
+	// LoadStrings load multiple scripts from string sources
+	LoadStrings(ctx context.Context, sources []string) error
 	// LoadFile load script from file path
 	LoadFile(ctx context.Context, filePath string) error
+	// LoadFiles load multiple scripts from file paths
+	LoadFiles(ctx context.Context, filePaths []string) error
 	// LoadReader load script from io.Reader
 	LoadReader(ctx context.Context, reader io.Reader, name string) error
 
@@ -36,8 +40,12 @@ type Engine interface {
 	// Script Execution
 	//////////////////////////////////////////////////////////////////////////////////////////
 
-	// Execute execute the loaded script
-	Execute(ctx context.Context) (any, error)
+	// ExecuteLoaded execute the previously loaded script(s)
+	ExecuteLoaded(ctx context.Context) (any, error)
+	// ExecuteStrings execute multiple scripts from string sources (immediate execution)
+	ExecuteStrings(ctx context.Context, sources []string) ([]any, error)
+	// ExecuteFiles execute multiple scripts from file paths (immediate execution)
+	ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error)
 	// ExecuteString execute script from string source
 	ExecuteString(ctx context.Context, source string) (any, error)
 	// ExecuteFile execute script from file path
