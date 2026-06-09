@@ -17,7 +17,7 @@ func init() {
 	})
 }
 
-// engine Lua 脚本引擎实现
+// engine is the Lua script engine implementation.
 type engine struct {
 	vm          *virtualMachine
 	initialized bool
@@ -27,18 +27,19 @@ type engine struct {
 	lastErrorMu sync.Mutex
 }
 
-// newLuaEngine 创建 Lua 引擎实例
+// newLuaEngine creates a Lua engine instance.
 func newLuaEngine() (*engine, error) {
 	return &engine{
 		initialized: false,
 	}, nil
 }
 
+// GetType returns the script engine type.
 func (e *engine) GetType() scriptEngine.Type {
 	return scriptEngine.LuaType
 }
 
-// Init 初始化引擎
+// Init initializes the engine.
 func (e *engine) Init(_ context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -55,7 +56,7 @@ func (e *engine) Init(_ context.Context) error {
 	return nil
 }
 
-// Close 销毁引擎
+// Close destroys the engine and releases underlying resources.
 func (e *engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -72,14 +73,14 @@ func (e *engine) Close() error {
 	return nil
 }
 
-// IsInitialized 检查是否已初始化
+// IsInitialized reports whether the engine has been initialized.
 func (e *engine) IsInitialized() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.initialized
 }
 
-// LoadString 加载字符串脚本
+// LoadString compiles and queues a script given as a string source.
 func (e *engine) LoadString(_ context.Context, source string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -99,6 +100,7 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	return nil
 }
 
+// LoadStrings compiles and queues multiple scripts from string sources.
 func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
 	for _, source := range sources {
 		if err := e.LoadString(ctx, source); err != nil {
@@ -108,6 +110,7 @@ func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
 	return nil
 }
 
+// LoadFiles compiles and queues multiple scripts from file paths.
 func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
 	for _, filePath := range filePaths {
 		if err := e.LoadFile(ctx, filePath); err != nil {
@@ -117,7 +120,7 @@ func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
 	return nil
 }
 
-// LoadFile 加载脚本文件
+// LoadFile reads, compiles and queues a script from the given file path.
 func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -137,7 +140,7 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	return nil
 }
 
-// LoadReader 从 Reader 加载脚本
+// LoadReader reads, compiles and queues a script from the given io.Reader.
 func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) error {
 	source, err := io.ReadAll(reader)
 	if err != nil {
@@ -148,14 +151,15 @@ func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) err
 	return e.LoadString(ctx, string(source))
 }
 
-// ExecuteLoaded 执行已加载的脚本
+// ExecuteLoaded runs every script queued by LoadString/LoadFile/LoadReader.
+// Context cancellation aborts the run.
 func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
 	}
 
-	// 使用 channel 处理超时
+	// Use a channel so the caller can cancel via ctx.
 	done := make(chan error, 1)
 
 	go func() {
@@ -185,6 +189,8 @@ func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	}
 }
 
+// ExecuteStrings compiles and immediately runs multiple string sources,
+// returning each result in order.
 func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
 	var results []any
 	for _, source := range sources {
@@ -197,6 +203,8 @@ func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, e
 	return results, nil
 }
 
+// ExecuteFiles compiles and immediately runs multiple file paths,
+// returning each result in order.
 func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
 	var results []any
 	for _, filePath := range filePaths {
@@ -209,7 +217,7 @@ func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, e
 	return results, nil
 }
 
-// ExecuteString 执行字符串脚本
+// ExecuteString compiles and immediately runs the given string source.
 func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
@@ -245,7 +253,7 @@ func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) 
 	}
 }
 
-// ExecuteFile 执行脚本文件
+// ExecuteFile compiles and immediately runs the script at the given file path.
 func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
@@ -281,7 +289,7 @@ func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) 
 	}
 }
 
-// RegisterGlobal 注册全局变量
+// RegisterGlobal binds a Go value into the Lua global scope under name.
 func (e *engine) RegisterGlobal(name string, value any) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -297,7 +305,7 @@ func (e *engine) RegisterGlobal(name string, value any) error {
 	return nil
 }
 
-// GetGlobal 获取全局变量
+// GetGlobal reads a global Lua variable and converts it to a Go value.
 func (e *engine) GetGlobal(name string) (any, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -313,7 +321,8 @@ func (e *engine) GetGlobal(name string) (any, error) {
 	return result, nil
 }
 
-// RegisterFunction 注册全局函数
+// RegisterFunction registers a global Lua function. fn must be of type
+// Lua.LGFunction; any other type returns an error.
 func (e *engine) RegisterFunction(name string, fn any) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -323,7 +332,7 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 		return ErrLuaEngineNotInitialized
 	}
 
-	// 类型断言检查是否为 Lua.LGFunction
+	// Type assertion: only Lua.LGFunction is accepted.
 	if lf, ok := fn.(Lua.LGFunction); ok {
 		e.vm.RegisterFunction(name, lf)
 		e.ClearError()
@@ -335,7 +344,7 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 	return err
 }
 
-// CallFunction 调用 Lua 函数
+// CallFunction calls the named Lua function with args and returns its result.
 func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
@@ -358,13 +367,13 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 			return
 		}
 
-		// 转换参数
+		// Convert Go args to LValue.
 		var lArgs []Lua.LValue
 		for _, arg := range args {
 			lArgs = append(lArgs, e.vm.convertToLValue(arg))
 		}
 
-		// 调用函数
+		// Invoke the function.
 		err := e.vm.L.CallByParam(Lua.P{
 			Fn:      e.vm.L.GetGlobal(name),
 			NRet:    1,
@@ -376,7 +385,7 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 			return
 		}
 
-		// 获取返回值
+		// Pop the return value off the stack.
 		ret := e.vm.L.Get(-1)
 		e.vm.L.Pop(1)
 
@@ -398,7 +407,8 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 	}
 }
 
-// RegisterModule 注册模块
+// RegisterModule registers a Lua module. module must be of type Lua.LGFunction;
+// any other type returns an error.
 func (e *engine) RegisterModule(name string, module any) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -419,7 +429,7 @@ func (e *engine) RegisterModule(name string, module any) error {
 	return err
 }
 
-// GetLastError 获取最后一个错误
+// GetLastError returns the last error recorded by the engine.
 func (e *engine) GetLastError() error {
 	e.lastErrorMu.Lock()
 	defer e.lastErrorMu.Unlock()
@@ -427,13 +437,14 @@ func (e *engine) GetLastError() error {
 	return e.lastError
 }
 
+// setLastError records the last error under lastErrorMu.
 func (e *engine) setLastError(err error) {
 	e.lastErrorMu.Lock()
 	defer e.lastErrorMu.Unlock()
 	e.lastError = err
 }
 
-// ClearError 清除错误
+// ClearError clears the last recorded error.
 func (e *engine) ClearError() {
 	e.lastErrorMu.Lock()
 	defer e.lastErrorMu.Unlock()

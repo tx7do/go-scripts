@@ -22,7 +22,7 @@ func TestStatePool(t *testing.T) {
 }
 
 func TestLuaTableMap(t *testing.T) {
-	// 将Lua表映射到Go结构
+	// Map a Lua table onto a Go struct.
 	type Role struct {
 		Name string
 	}

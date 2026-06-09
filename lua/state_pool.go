@@ -6,18 +6,21 @@ import (
 	Lua "github.com/yuin/gopher-lua"
 )
 
+// defaultMaxSaved is the default upper bound on recycled LState instances.
 const defaultMaxSaved = 10
 
 func init() {
 	luaPool = newStatePool()
 }
 
+// luaPool is the package-level pool used by newVirtualMachine.
 var luaPool = newStatePool()
 
-// luaStateArray Lua 状态数组
+// luaStateArray is a stack of LState pointers awaiting reuse.
 type luaStateArray []*Lua.LState
 
-// statePool Lua 状态池
+// statePool recycles LState instances to avoid the cost of creating new ones
+// on every script run.
 type statePool struct {
 	m        sync.Mutex
 	saved    luaStateArray
@@ -26,7 +29,7 @@ type statePool struct {
 	options  Lua.Options
 }
 
-// newStatePool 创建新的 Lua 状态池
+// newStatePool creates a statePool with sensible defaults.
 func newStatePool() *statePool {
 	return newStatePoolWithOptions(Lua.Options{
 		CallStackSize:       4096,
@@ -36,6 +39,7 @@ func newStatePool() *statePool {
 	})
 }
 
+// newStatePoolWithOptions creates a statePool using the supplied Lua.Options.
 func newStatePoolWithOptions(opts Lua.Options) *statePool {
 	return &statePool{
 		saved:    make(luaStateArray, 0, defaultMaxSaved),
@@ -44,14 +48,15 @@ func newStatePoolWithOptions(opts Lua.Options) *statePool {
 	}
 }
 
-// SetOptions 在运行时更改池创建新 LState 时使用的选项（线程安全）
+// SetOptions updates the options used when creating new LState instances.
+// Thread-safe.
 func (pl *statePool) SetOptions(opts Lua.Options) {
 	pl.m.Lock()
 	pl.options = opts
 	pl.m.Unlock()
 }
 
-// createLuaState 创建新的 Lua 状态实例
+// createLuaState creates a new LState using the default options.
 func (pl *statePool) createLuaState() *Lua.LState {
 	vm := pl.createLuaStateWithOptions(Lua.Options{
 		CallStackSize:       4096,
@@ -62,13 +67,13 @@ func (pl *statePool) createLuaState() *Lua.LState {
 	return vm
 }
 
-// createLuaStateWithOptions 使用指定选项创建新的 Lua 状态实例
+// createLuaStateWithOptions creates a new LState using the given options.
 func (pl *statePool) createLuaStateWithOptions(options Lua.Options) *Lua.LState {
 	vm := Lua.NewState(options)
 	return vm
 }
 
-// Borrow 从池中借用一个 Lua 状态实例
+// Borrow returns an LState from the pool, creating a new one when none is idle.
 func (pl *statePool) Borrow() *Lua.LState {
 	pl.m.Lock()
 	n := len(pl.saved)
@@ -81,14 +86,16 @@ func (pl *statePool) Borrow() *Lua.LState {
 	closed := pl.closed
 	pl.m.Unlock()
 
-	// 池为空：若池已关闭仍可创建新的状态（调用者可决定是否继续使用）
+	// Pool empty: even if the pool is closed we still create a new state; the
+	// caller may decide whether to keep using it.
 	if closed {
 		return pl.createLuaState()
 	}
 	return pl.createLuaState()
 }
 
-// Return 将 Lua 状态实例归还到池中
+// Return puts an LState back into the pool. If the pool is closed or full, the
+// LState is Closed instead to release its resources.
 func (pl *statePool) Return(L *Lua.LState) {
 	if L == nil {
 		return
@@ -97,7 +104,7 @@ func (pl *statePool) Return(L *Lua.LState) {
 	pl.m.Lock()
 	if pl.closed {
 		pl.m.Unlock()
-		// 池已关闭，直接释放 L
+		// Pool is closed; release L immediately.
 		L.Close()
 		return
 	}
@@ -109,11 +116,11 @@ func (pl *statePool) Return(L *Lua.LState) {
 	}
 	pl.m.Unlock()
 
-	// 池已满，关闭 L 以释放资源
+	// Pool is full; close L to release resources.
 	L.Close()
 }
 
-// Shutdown 关闭状态池中的所有 Lua 状态实例
+// Shutdown closes the pool and releases every idle LState it owns.
 func (pl *statePool) Shutdown() {
 	pl.m.Lock()
 	if pl.closed {

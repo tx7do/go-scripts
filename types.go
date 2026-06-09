@@ -2,26 +2,27 @@ package script_engine
 
 import "time"
 
+// Type identifies a script engine implementation.
 type Type string
 
 const (
-	// LuaType Lua Script Engine Type
+	// LuaType is the Type for Lua script engines.
 	LuaType Type = "lua"
 
-	// JavaScriptType JavaScript Script Engine Type
+	// JavaScriptType is the Type for JavaScript script engines.
 	JavaScriptType Type = "javascript"
 
-	// PythonType Python Script Engine Type
+	// PythonType is the Type for Python script engines.
 	PythonType Type = "python"
 )
 
-// CallResult 函数调用结果
+// CallResult holds the return values of a function call.
 type CallResult struct {
 	Values []any
 	Error  error
 }
 
-// ExecuteOptions 执行选项
+// ExecuteOptions controls how a script is executed.
 type ExecuteOptions struct {
 	Timeout  time.Duration
 	Globals  map[string]any

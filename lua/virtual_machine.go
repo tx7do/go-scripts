@@ -13,13 +13,16 @@ import (
 	luar "layeh.com/gopher-luar"
 )
 
+// TableMap is a convenience alias for maps exchanged between Go and Lua.
 type TableMap map[string]interface{}
 
+// virtualMachine wraps a Lua LState and the currently-loaded function.
 type virtualMachine struct {
 	L *Lua.LState
 	F *Lua.LFunction
 }
 
+// newVirtualMachine borrows a Lua state from the pool and initializes it.
 func newVirtualMachine() *virtualMachine {
 	exec := &virtualMachine{
 		L: luaPool.Borrow(),
@@ -28,12 +31,14 @@ func newVirtualMachine() *virtualMachine {
 	return exec
 }
 
-// GetRunPath 获取程序执行目录
+// GetRunPath returns the absolute directory of the current executable.
 func GetRunPath() string {
 	path, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 	return path
 }
 
+// init opens the standard Lua libs and preloads extras (gopher-lua-libs,
+// gluacrypto, ...) and registers a GetLuaPath helper.
 func (e *virtualMachine) init() {
 
 	e.L.OpenLibs()
@@ -45,20 +50,20 @@ func (e *virtualMachine) init() {
 	//lua_debugger.Preload(e.L)
 
 	e.RegisterFunction("GetLuaPath", func(vm *Lua.LState) int {
-		// 绝对路径
+		// absolute path of the executable's directory
 		e.L.Push(Lua.LString(GetRunPath() + "/script"))
 		return 1
 	})
 }
 
-// Destroy 销毁虚拟机，为了性能考虑，现在只是将之还给虚拟机池。
+// Destroy returns the borrowed Lua state to the pool.
 func (e *virtualMachine) Destroy() {
 	if e.L != nil {
 		luaPool.Return(e.L)
 	}
 }
 
-// LoadString 加载字符串，并编译成字节码
+// LoadString compiles a string source into a Lua function.
 func (e *virtualMachine) LoadString(source string) error {
 	var lFunc *Lua.LFunction
 	var err error
@@ -71,7 +76,7 @@ func (e *virtualMachine) LoadString(source string) error {
 	return nil
 }
 
-// LoadFile 加载文件，并编译成字节码
+// LoadFile compiles the file at the given path into a Lua function.
 func (e *virtualMachine) LoadFile(filePath string) error {
 	var lFunc *Lua.LFunction
 	var err error
@@ -84,7 +89,7 @@ func (e *virtualMachine) LoadFile(filePath string) error {
 	return nil
 }
 
-// Execute 执行已编译的lua代码
+// Execute runs the previously-compiled Lua function.
 func (e *virtualMachine) Execute() error {
 	if err := e.doCompiledFile(); err != nil {
 		return err
@@ -92,7 +97,7 @@ func (e *virtualMachine) Execute() error {
 	return nil
 }
 
-// ExecuteString 直接执行字符串
+// ExecuteString immediately runs the given string source.
 func (e *virtualMachine) ExecuteString(source string) error {
 	if err := e.L.DoString(source); err != nil {
 		return err
@@ -100,7 +105,7 @@ func (e *virtualMachine) ExecuteString(source string) error {
 	return nil
 }
 
-// ExecuteFile 直接执行lua文件
+// ExecuteFile immediately runs the script at the given file path.
 func (e *virtualMachine) ExecuteFile(filePath string) error {
 	if err := e.L.DoFile(filePath); err != nil {
 		return err
@@ -108,7 +113,7 @@ func (e *virtualMachine) ExecuteFile(filePath string) error {
 	return nil
 }
 
-// CallFunction 调用lua当中的方法
+// CallFunction invokes a global Lua function by name. Panics on error.
 func (e *virtualMachine) CallFunction(name string, args ...interface{}) {
 	var lArgs []Lua.LValue
 	for _, arg := range args {
@@ -117,13 +122,14 @@ func (e *virtualMachine) CallFunction(name string, args ...interface{}) {
 
 	if err := e.L.CallByParam(Lua.P{
 		Fn:      e.L.GetGlobal(name),
-		NRet:    1,    // 指定返回值数量
-		Protect: true, // 如果出现异常，是panic还是返回err
-	}, lArgs...); err != nil { // 传递输入参数：10
+		NRet:    1,    // number of return values
+		Protect: true, // return error instead of panic on failure
+	}, lArgs...); err != nil { // input arguments
 		panic(err)
 	}
 }
 
+// PCall calls the named global function via pcall; errors are logged, not returned.
 func (e *virtualMachine) PCall(f string, args ...interface{}) {
 	e.L.Push(e.L.GetGlobal(f))
 	for _, arg := range args {
@@ -135,6 +141,7 @@ func (e *virtualMachine) PCall(f string, args ...interface{}) {
 	}
 }
 
+// PCall2 is like PCall but accepts pre-converted LValue arguments.
 func (e *virtualMachine) PCall2(f string, args ...Lua.LValue) {
 	e.L.Push(e.L.GetGlobal(f))
 	for _, arg := range args {
@@ -145,6 +152,7 @@ func (e *virtualMachine) PCall2(f string, args ...Lua.LValue) {
 	}
 }
 
+// PCall3 is like PCall2 but accepts an LValue callable directly (not a name).
 func (e *virtualMachine) PCall3(f Lua.LValue, args ...Lua.LValue) {
 	e.L.Push(f)
 	for _, arg := range args {
@@ -155,35 +163,36 @@ func (e *virtualMachine) PCall3(f Lua.LValue, args ...Lua.LValue) {
 	}
 }
 
-// RegisterFunction 注册一个全局的方法到lua
+// RegisterFunction registers a Go function as a global Lua function.
 func (e *virtualMachine) RegisterFunction(name string, fn Lua.LGFunction) {
 	e.L.SetGlobal(name, e.L.NewFunction(fn))
 }
 
-// RegisterModule 注册一个模块到lua
+// RegisterModule registers a Lua module loader under name.
 func (e *virtualMachine) RegisterModule(name string, mod Lua.LGFunction) {
 	e.L.Push(e.L.NewFunction(mod))
 	e.L.Push(Lua.LString(name))
 	e.L.Call(1, 0)
 }
 
-// BindStruct 绑定一个struct到lua，可以双向操作。
+// BindStruct binds a Go struct (or any value) to a Lua global, allowing both
+// sides to read/write it.
 func (e *virtualMachine) BindStruct(name string, data interface{}) {
 	e.L.SetGlobal(name, luar.New(e.L, data))
 }
 
-// GetLuaTableToStruct 从lua读取一个table到go的struct
+// GetLuaTableToStruct maps a Lua table into the given Go struct via gluamapper.
 func (e *virtualMachine) GetLuaTableToStruct(name string, out interface{}) error {
 	return gluamapper.Map(e.L.GetGlobal(name).(*Lua.LTable), &out)
 }
 
-// 执行已经编译的字节码
+// doCompiledFile runs the currently-loaded compiled function.
 func (e *virtualMachine) doCompiledFile() error {
 	e.L.Push(e.F)
 	return e.L.PCall(0, Lua.MultRet, nil)
 }
 
-// convertToLValue 将go的值转换为LValue
+// convertToLValue converts a Go value into a Lua LValue.
 func (e *virtualMachine) convertToLValue(val interface{}) Lua.LValue {
 	if val == nil {
 		return Lua.LNil
@@ -234,7 +243,7 @@ func (e *virtualMachine) convertToLValue(val interface{}) Lua.LValue {
 	}
 }
 
-// convertFromLValue 将LValue转换为go的值
+// convertFromLValue converts a Lua LValue into a Go value.
 func (e *virtualMachine) convertFromLValue(lv Lua.LValue) interface{} {
 	switch v := lv.(type) {
 	case *Lua.LNilType:
@@ -255,7 +264,7 @@ func (e *virtualMachine) convertFromLValue(lv Lua.LValue) interface{} {
 	case *Lua.LTable:
 		maxN := v.MaxN()
 		if maxN == 0 {
-			// table
+			// map-style table
 			ret := make(map[string]interface{})
 			v.ForEach(func(key, value Lua.LValue) {
 				keyStr := fmt.Sprint(e.convertFromLValue(key))
@@ -263,7 +272,7 @@ func (e *virtualMachine) convertFromLValue(lv Lua.LValue) interface{} {
 			})
 			return ret
 		} else {
-			// array
+			// array-style table
 			ret := make([]interface{}, 0, maxN)
 			for i := 1; i <= maxN; i++ {
 				ret = append(ret, e.convertFromLValue(v.RawGetInt(i)))
@@ -276,7 +285,7 @@ func (e *virtualMachine) convertFromLValue(lv Lua.LValue) interface{} {
 	}
 }
 
-// convertToLTable 将go的map转换成LTable
+// convertToLTable converts a Go map into a Lua LTable.
 func (e *virtualMachine) convertToLTable(data map[string]interface{}) *Lua.LTable {
 	lt := e.L.NewTable()
 
@@ -287,7 +296,7 @@ func (e *virtualMachine) convertToLTable(data map[string]interface{}) *Lua.LTabl
 	return lt
 }
 
-// convertFromLTable 将LTable转换成map。
+// convertFromLTable converts a Lua LTable into a Go map.
 func (e *virtualMachine) convertFromLTable(lv *Lua.LTable) map[string]interface{} {
 	returnData, _ := e.convertFromLValue(lv).(map[string]interface{})
 	return returnData

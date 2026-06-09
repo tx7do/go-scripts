@@ -8,8 +8,9 @@ import (
 	"sync"
 )
 
-// EnginePool 管理多个独立 Engine 实例以支持并发执行。
-// NewEnginePool 需要提供一个 factory 用于创建单个 Engine 实例。
+// EnginePool manages a fixed number of independent Engine instances to support
+// concurrent execution. The pool is created via NewEnginePool, which uses the
+// factory registered for typ to instantiate each Engine.
 type EnginePool struct {
 	pool   chan Engine
 	size   int
@@ -17,8 +18,8 @@ type EnginePool struct {
 	closed bool
 }
 
-// NewEnginePool 创建并初始化一个包含 size 个 Engine 的池。
-// factory 用于创建单个 Engine（例如 newLuaEngine）。
+// NewEnginePool creates and initializes a pool of size Engines.
+// typ selects the registered factory used to create each Engine.
 func NewEnginePool(size int, typ Type) (*EnginePool, error) {
 	if size < 1 {
 		return nil, errors.New("pool size must be >= 1")
@@ -29,19 +30,19 @@ func NewEnginePool(size int, typ Type) (*EnginePool, error) {
 		size: size,
 	}
 
-	// 创建并初始化子 engine
+	// Create and initialize each Engine; clean up on failure.
 	created := make([]Engine, 0, size)
 	for i := 0; i < size; i++ {
 		eng, err := NewScriptEngine(typ)
 		if err != nil {
-			// 清理已创建的 engines
+			// Clean up already-created engines.
 			for _, e := range created {
 				_ = e.Close()
 			}
 			return nil, fmt.Errorf("factory failed: %w", err)
 		}
 
-		// 调用 Init，失败则清理并返回
+		// Call Init; on failure clean up and bail out.
 		if initErr := eng.Init(context.Background()); initErr != nil {
 			_ = eng.Close()
 			for _, e := range created {
@@ -60,7 +61,8 @@ func NewEnginePool(size int, typ Type) (*EnginePool, error) {
 	return p, nil
 }
 
-// Acquire 从池中获取一个 Engine（会阻塞直到有可用的）。
+// Acquire takes an Engine out of the pool. It blocks until one becomes available.
+// Returns an error if the pool is already closed.
 func (p *EnginePool) Acquire() (Engine, error) {
 	p.mu.Lock()
 	if p.closed {
@@ -76,7 +78,8 @@ func (p *EnginePool) Acquire() (Engine, error) {
 	return eng, nil
 }
 
-// Release 将 Engine 放回池中；若池已关闭则关闭该 Engine。
+// Release returns an Engine to the pool. If the pool is already closed, the
+// Engine is Closed instead.
 func (p *EnginePool) Release(e Engine) {
 	if e == nil {
 		return
@@ -90,7 +93,7 @@ func (p *EnginePool) Release(e Engine) {
 		return
 	}
 
-	// 捕获并发 Close 导致的 send-on-closed panic
+	// Guard against send-on-closed panic caused by concurrent Close.
 	defer func() {
 		if r := recover(); r != nil {
 			_ = e.Close()
@@ -104,7 +107,7 @@ func (p *EnginePool) Release(e Engine) {
 	}
 }
 
-// Close 关闭池并销毁所有子 Engine。
+// Close closes the pool and destroys all pooled Engines.
 func (p *EnginePool) Close() error {
 	p.mu.Lock()
 	if p.closed {
@@ -124,18 +127,22 @@ func (p *EnginePool) Close() error {
 	return lastErr
 }
 
-// IsClosed 返回池是否已关闭。
+// IsClosed reports whether the pool has been closed.
 func (p *EnginePool) IsClosed() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.closed
 }
 
-// 以下为常见包装方法：自动 acquire -> 调用 -> release。
-// 若项目的 Engine 接口有所不同，可按需增减/调整。
+// The following methods are common wrappers that follow the pattern
+//     Acquire -> invoke -> Release.
+// They exist so callers can avoid the Acquire/Release boilerplate for trivial
+// one-shot calls. Adjust or remove them to match your Engine interface.
 
+// InitAll re-initializes every Engine in the pool.
+// It acquires all instances, calls Init on each, and releases them back.
 func (p *EnginePool) InitAll(ctx context.Context) error {
-	// 尝试获取池中所有实例
+	// Acquire every instance in the pool.
 	engines := make([]Engine, 0, p.size)
 	for i := 0; i < p.size; i++ {
 		eng, err := p.Acquire()
@@ -148,7 +155,7 @@ func (p *EnginePool) InitAll(ctx context.Context) error {
 		engines = append(engines, eng)
 	}
 
-	// 对每个实例执行 Init()
+	// Call Init on each instance.
 	for _, eng := range engines {
 		if err := eng.Init(ctx); err != nil {
 			for _, e := range engines {
@@ -158,13 +165,14 @@ func (p *EnginePool) InitAll(ctx context.Context) error {
 		}
 	}
 
-	// 释放回池
+	// Release them back to the pool.
 	for _, eng := range engines {
 		p.Release(eng)
 	}
 	return nil
 }
 
+// LoadString loads a script from a string into an acquired Engine.
 func (p *EnginePool) LoadString(ctx context.Context, source string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -174,6 +182,7 @@ func (p *EnginePool) LoadString(ctx context.Context, source string) error {
 	return eng.LoadString(ctx, source)
 }
 
+// LoadFile loads a script from a file path into an acquired Engine.
 func (p *EnginePool) LoadFile(ctx context.Context, filePath string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -183,6 +192,7 @@ func (p *EnginePool) LoadFile(ctx context.Context, filePath string) error {
 	return eng.LoadFile(ctx, filePath)
 }
 
+// LoadReader loads a script from an io.Reader into an acquired Engine.
 func (p *EnginePool) LoadReader(ctx context.Context, reader io.Reader, name string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -192,6 +202,7 @@ func (p *EnginePool) LoadReader(ctx context.Context, reader io.Reader, name stri
 	return eng.LoadReader(ctx, reader, name)
 }
 
+// LoadStrings loads multiple scripts from string sources into an acquired Engine.
 func (p *EnginePool) LoadStrings(ctx context.Context, sources []string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -201,6 +212,7 @@ func (p *EnginePool) LoadStrings(ctx context.Context, sources []string) error {
 	return eng.LoadStrings(ctx, sources)
 }
 
+// LoadFiles loads multiple scripts from file paths into an acquired Engine.
 func (p *EnginePool) LoadFiles(ctx context.Context, filePaths []string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -210,6 +222,7 @@ func (p *EnginePool) LoadFiles(ctx context.Context, filePaths []string) error {
 	return eng.LoadFiles(ctx, filePaths)
 }
 
+// ExecuteLoaded runs the previously loaded script(s) on an acquired Engine.
 func (p *EnginePool) ExecuteLoaded(ctx context.Context) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -219,6 +232,7 @@ func (p *EnginePool) ExecuteLoaded(ctx context.Context) (any, error) {
 	return eng.ExecuteLoaded(ctx)
 }
 
+// ExecuteString runs the given script source on an acquired Engine.
 func (p *EnginePool) ExecuteString(ctx context.Context, source string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -228,6 +242,7 @@ func (p *EnginePool) ExecuteString(ctx context.Context, source string) (any, err
 	return eng.ExecuteString(ctx, source)
 }
 
+// ExecuteFile runs the script at the given file path on an acquired Engine.
 func (p *EnginePool) ExecuteFile(ctx context.Context, filePath string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -237,6 +252,8 @@ func (p *EnginePool) ExecuteFile(ctx context.Context, filePath string) (any, err
 	return eng.ExecuteFile(ctx, filePath)
 }
 
+// ExecuteStrings runs multiple script sources on an acquired Engine and returns
+// each result in order.
 func (p *EnginePool) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -246,6 +263,8 @@ func (p *EnginePool) ExecuteStrings(ctx context.Context, sources []string) ([]an
 	return eng.ExecuteStrings(ctx, sources)
 }
 
+// ExecuteFiles runs multiple script files on an acquired Engine and returns each
+// result in order.
 func (p *EnginePool) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -255,6 +274,8 @@ func (p *EnginePool) ExecuteFiles(ctx context.Context, filePaths []string) ([]an
 	return eng.ExecuteFiles(ctx, filePaths)
 }
 
+// RegisterGlobal registers a global variable on an acquired Engine.
+// Note: the registration is local to that Engine instance.
 func (p *EnginePool) RegisterGlobal(name string, value any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -264,6 +285,7 @@ func (p *EnginePool) RegisterGlobal(name string, value any) error {
 	return eng.RegisterGlobal(name, value)
 }
 
+// GetGlobal reads a global variable from an acquired Engine.
 func (p *EnginePool) GetGlobal(name string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -273,6 +295,8 @@ func (p *EnginePool) GetGlobal(name string) (any, error) {
 	return eng.GetGlobal(name)
 }
 
+// RegisterFunction registers a function on an acquired Engine.
+// Note: the registration is local to that Engine instance.
 func (p *EnginePool) RegisterFunction(name string, fn any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -282,6 +306,7 @@ func (p *EnginePool) RegisterFunction(name string, fn any) error {
 	return eng.RegisterFunction(name, fn)
 }
 
+// CallFunction calls the named function on an acquired Engine with the given args.
 func (p *EnginePool) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -291,6 +316,8 @@ func (p *EnginePool) CallFunction(ctx context.Context, name string, args ...any)
 	return eng.CallFunction(ctx, name, args...)
 }
 
+// RegisterModule registers a module on an acquired Engine.
+// Note: the registration is local to that Engine instance.
 func (p *EnginePool) RegisterModule(name string, module any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -300,6 +327,7 @@ func (p *EnginePool) RegisterModule(name string, module any) error {
 	return eng.RegisterModule(name, module)
 }
 
+// GetLastError returns the last error from an acquired Engine.
 func (p *EnginePool) GetLastError() error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -309,6 +337,7 @@ func (p *EnginePool) GetLastError() error {
 	return eng.GetLastError()
 }
 
+// ClearError clears the last error on an acquired Engine.
 func (p *EnginePool) ClearError() {
 	eng, err := p.Acquire()
 	if err != nil {

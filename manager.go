@@ -6,25 +6,26 @@ import (
 	"sync"
 )
 
-// Manager 管理多个 Engine 实例的生命周期与访问。
-// - 适用于需要多个引擎实例、统一 Init/Close、或按 name 获取的场景。
-// - 若项目只需要单个全局 Engine，可不使用 Manager。
+// Manager manages the lifecycle and access of multiple Engine instances.
+//   - Useful when the application needs multiple engine instances, unified
+//     Init/Close, or name-based lookup.
+//   - If the project only needs a single global Engine, Manager is unnecessary.
 type Manager struct {
 	mu      sync.RWMutex
 	engines map[string]Engine
-	// optional: 记录默认引擎名或全局配置
+	// defaultName optionally records the default engine name for nameless lookup.
 	defaultName string
 }
 
-// NewManager 创建 Manager。
+// NewManager creates a Manager.
 func NewManager() *Manager {
 	return &Manager{
 		engines: make(map[string]Engine),
 	}
 }
 
-// Register 注册一个 Engine（不初始化）。
-// 若 name 已存在返回错误。
+// Register registers an Engine without initializing it.
+// Returns an error if name already exists.
 func (m *Manager) Register(name string, eng Engine) error {
 	if name == "" || eng == nil {
 		return errors.New("invalid name or engine")
@@ -38,7 +39,7 @@ func (m *Manager) Register(name string, eng Engine) error {
 	return nil
 }
 
-// Get 返回已注册的 Engine。
+// Get returns the registered Engine for the given name.
 func (m *Manager) Get(name string) (Engine, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -46,7 +47,7 @@ func (m *Manager) Get(name string) (Engine, bool) {
 	return eng, ok
 }
 
-// InitAll 对所有已注册引擎执行 Init。
+// InitAll calls Init on every registered Engine.
 func (m *Manager) InitAll(ctx context.Context) error {
 	m.mu.RLock()
 	list := make([]Engine, 0, len(m.engines))
@@ -63,14 +64,15 @@ func (m *Manager) InitAll(ctx context.Context) error {
 	return nil
 }
 
-// CloseAll 关闭所有已注册引擎（并忽略单个 Close 错误，返回最后一个错误）。
+// CloseAll closes every registered Engine. Individual Close errors are ignored;
+// the last non-nil error is returned.
 func (m *Manager) CloseAll() error {
 	m.mu.Lock()
 	list := make([]Engine, 0, len(m.engines))
 	for _, e := range m.engines {
 		list = append(list, e)
 	}
-	// 清空注册表以防重复 Close
+	// Clear the registry to prevent double Close.
 	m.engines = make(map[string]Engine)
 	m.mu.Unlock()
 
@@ -83,7 +85,8 @@ func (m *Manager) CloseAll() error {
 	return lastErr
 }
 
-// Remove 注销并可选择关闭该 Engine（若 closeIfExists 为 true）。
+// Remove unregisters the Engine with the given name.
+// If closeIfExists is true and the Engine exists, it is also Closed.
 func (m *Manager) Remove(name string, closeIfExists bool) {
 	m.mu.Lock()
 	e, ok := m.engines[name]
@@ -97,14 +100,14 @@ func (m *Manager) Remove(name string, closeIfExists bool) {
 	}
 }
 
-// SetDefault 设置默认引擎名，便于不指定 name 时使用。
+// SetDefault sets the default engine name used by GetDefault.
 func (m *Manager) SetDefault(name string) {
 	m.mu.Lock()
 	m.defaultName = name
 	m.mu.Unlock()
 }
 
-// GetDefault 获取默认引擎。
+// GetDefault returns the default Engine.
 func (m *Manager) GetDefault() (Engine, bool) {
 	return m.Get(m.defaultName)
 }

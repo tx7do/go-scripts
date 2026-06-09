@@ -8,20 +8,23 @@ import (
 	"sync"
 )
 
-// AutoGrowEnginePool 是可按需扩展但有上限的引擎池。
+// AutoGrowEnginePool is an Engine pool that can grow on demand up to a configured
+// maximum. Idle instances are reused; when none is available and the cap has not
+// been reached, a new Engine is created on the fly.
 type AutoGrowEnginePool struct {
 	pool chan Engine
 	typ  Type
 
 	mu     sync.Mutex
-	total  int // 当前已创建的实例数
+	total  int // number of Engine instances currently alive
 	max    int
 	closed bool
 }
 
-// NewAutoGrowEnginePool 创建一个可自增长的池。
-// initialSize: 初始创建数量（>=0）
-// maxSize: 池允许的最大实例数（必须 >= initialSize && >=1）
+// NewAutoGrowEnginePool creates a pool that can grow on demand.
+//   - initialSize: number of Engines to create eagerly (>= 0)
+//   - maxSize: upper bound on instance count (must be >= initialSize and >= 1)
+//   - typ: selects the registered factory used to build each Engine
 func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEnginePool, error) {
 	if maxSize < 1 || initialSize < 0 || initialSize > maxSize {
 		return nil, fmt.Errorf("invalid sizes: initial=%d max=%d", initialSize, maxSize)
@@ -31,13 +34,13 @@ func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEngineP
 	}
 
 	p := &AutoGrowEnginePool{
-		pool:  make(chan Engine, maxSize), // 通道容量设为 maxSize
+		pool:  make(chan Engine, maxSize), // channel capacity equals the cap
 		typ:   typ,
 		total: 0,
 		max:   maxSize,
 	}
 
-	// 先全部创建并初始化到切片中，失败时统一清理
+	// Build the initial set of Engines; on any failure clean them all up.
 	created := make([]Engine, 0, initialSize)
 	for i := 0; i < initialSize; i++ {
 		eng, err := NewScriptEngine(typ)
@@ -59,7 +62,8 @@ func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEngineP
 		created = append(created, eng)
 	}
 
-	// 全部创建并初始化成功后再放入通道并设置 total
+	// All initial instances were created and initialized successfully; push them
+	// into the channel and commit the total counter.
 	for _, e := range created {
 		p.pool <- e
 	}
@@ -68,7 +72,10 @@ func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEngineP
 	return p, nil
 }
 
-// Acquire 获取一个 Engine：优先立即取空闲实例；若无且未到 max，则创建并返回新实例；否则阻塞等待。
+// Acquire returns an Engine from the pool.
+//   - If an idle instance is available, it is returned immediately.
+//   - Otherwise, if total < max, a new instance is created and returned.
+//   - Otherwise the call blocks until an instance is released.
 func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 	p.mu.Lock()
 	if p.closed {
@@ -77,28 +84,28 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 	}
 	p.mu.Unlock()
 
-	// 尝试立即取一个空闲实例
+	// Fast path: grab an idle instance if one is immediately available.
 	select {
 	case eng := <-p.pool:
 		return eng, nil
 	default:
 	}
 
-	// 无空闲实例，尝试按需创建新实例（如果未到上限）
+	// No idle instance; try to grow the pool if the cap allows.
 	p.mu.Lock()
 	if p.total < p.max {
 		p.total++
 		p.mu.Unlock()
 		eng, err := NewScriptEngine(p.typ)
 		if err != nil {
-			// 创建失败，回退计数
+			// Creation failed; roll back the counter.
 			p.mu.Lock()
 			p.total--
 			p.mu.Unlock()
 			return nil, err
 		}
 
-		// 初始化引擎
+		// Initialize the freshly created engine.
 		if initErr := eng.Init(context.Background()); initErr != nil {
 			_ = eng.Close()
 			p.mu.Lock()
@@ -109,7 +116,7 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 
 		return eng, nil
 	}
-	// 已到上限，必须阻塞等待空闲实例
+	// Cap reached; must wait for a released instance.
 	p.mu.Unlock()
 
 	eng, ok := <-p.pool
@@ -120,7 +127,8 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 	return eng, nil
 }
 
-// Release 归还 Engine；若池已关闭或通道已满则关闭该实例。
+// Release returns an Engine to the pool. If the pool is closed or the channel
+// is full, the Engine is Closed instead and the live counter is decremented.
 func (p *AutoGrowEnginePool) Release(e Engine) {
 	if e == nil {
 		return
@@ -131,11 +139,12 @@ func (p *AutoGrowEnginePool) Release(e Engine) {
 
 	if closed {
 		_ = e.Close()
-		// 可选：根据语义决定是否在这里调整 total
+		// Optional: decide whether to adjust `total` here based on semantics.
 		return
 	}
 
-	// 捕获 send-on-closed 的 panic，发生时安全关闭并尝试调整计数
+	// Guard against send-on-closed panic; if it fires, close the Engine and try
+	// to keep the live counter consistent.
 	defer func() {
 		if r := recover(); r != nil {
 			_ = e.Close()
@@ -159,7 +168,9 @@ func (p *AutoGrowEnginePool) Release(e Engine) {
 	}
 }
 
-// Close 关闭池并销毁所有空闲实例。已借出的实例应由调用方关闭或归还后会被关闭。
+// Close closes the pool and destroys every currently idle instance.
+// Engines that are still borrowed must be Closed by their callers (or will be
+// Closed when eventually released).
 func (p *AutoGrowEnginePool) Close() error {
 	p.mu.Lock()
 	if p.closed {
@@ -179,6 +190,7 @@ func (p *AutoGrowEnginePool) Close() error {
 	return lastErr
 }
 
+// LoadString loads a script from a string into an acquired Engine.
 func (p *AutoGrowEnginePool) LoadString(ctx context.Context, source string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -188,6 +200,7 @@ func (p *AutoGrowEnginePool) LoadString(ctx context.Context, source string) erro
 	return eng.LoadString(ctx, source)
 }
 
+// LoadFile loads a script from a file path into an acquired Engine.
 func (p *AutoGrowEnginePool) LoadFile(ctx context.Context, filePath string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -197,6 +210,7 @@ func (p *AutoGrowEnginePool) LoadFile(ctx context.Context, filePath string) erro
 	return eng.LoadFile(ctx, filePath)
 }
 
+// LoadReader loads a script from an io.Reader into an acquired Engine.
 func (p *AutoGrowEnginePool) LoadReader(ctx context.Context, reader io.Reader, name string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -206,6 +220,7 @@ func (p *AutoGrowEnginePool) LoadReader(ctx context.Context, reader io.Reader, n
 	return eng.LoadReader(ctx, reader, name)
 }
 
+// LoadStrings loads multiple scripts from string sources into an acquired Engine.
 func (p *AutoGrowEnginePool) LoadStrings(ctx context.Context, sources []string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -215,6 +230,7 @@ func (p *AutoGrowEnginePool) LoadStrings(ctx context.Context, sources []string) 
 	return eng.LoadStrings(ctx, sources)
 }
 
+// LoadFiles loads multiple scripts from file paths into an acquired Engine.
 func (p *AutoGrowEnginePool) LoadFiles(ctx context.Context, filePaths []string) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -224,6 +240,7 @@ func (p *AutoGrowEnginePool) LoadFiles(ctx context.Context, filePaths []string) 
 	return eng.LoadFiles(ctx, filePaths)
 }
 
+// ExecuteLoaded runs the previously loaded script(s) on an acquired Engine.
 func (p *AutoGrowEnginePool) ExecuteLoaded(ctx context.Context) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -233,6 +250,7 @@ func (p *AutoGrowEnginePool) ExecuteLoaded(ctx context.Context) (any, error) {
 	return eng.ExecuteLoaded(ctx)
 }
 
+// ExecuteString runs the given script source on an acquired Engine.
 func (p *AutoGrowEnginePool) ExecuteString(ctx context.Context, source string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -242,6 +260,7 @@ func (p *AutoGrowEnginePool) ExecuteString(ctx context.Context, source string) (
 	return eng.ExecuteString(ctx, source)
 }
 
+// ExecuteFile runs the script at the given file path on an acquired Engine.
 func (p *AutoGrowEnginePool) ExecuteFile(ctx context.Context, filePath string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -251,6 +270,8 @@ func (p *AutoGrowEnginePool) ExecuteFile(ctx context.Context, filePath string) (
 	return eng.ExecuteFile(ctx, filePath)
 }
 
+// ExecuteStrings runs multiple script sources on an acquired Engine and returns
+// each result in order.
 func (p *AutoGrowEnginePool) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -260,6 +281,8 @@ func (p *AutoGrowEnginePool) ExecuteStrings(ctx context.Context, sources []strin
 	return eng.ExecuteStrings(ctx, sources)
 }
 
+// ExecuteFiles runs multiple script files on an acquired Engine and returns each
+// result in order.
 func (p *AutoGrowEnginePool) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -269,6 +292,8 @@ func (p *AutoGrowEnginePool) ExecuteFiles(ctx context.Context, filePaths []strin
 	return eng.ExecuteFiles(ctx, filePaths)
 }
 
+// RegisterGlobal registers a global variable on an acquired Engine.
+// Note: the registration is local to that Engine instance.
 func (p *AutoGrowEnginePool) RegisterGlobal(name string, value any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -278,6 +303,7 @@ func (p *AutoGrowEnginePool) RegisterGlobal(name string, value any) error {
 	return eng.RegisterGlobal(name, value)
 }
 
+// GetGlobal reads a global variable from an acquired Engine.
 func (p *AutoGrowEnginePool) GetGlobal(name string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -287,6 +313,8 @@ func (p *AutoGrowEnginePool) GetGlobal(name string) (any, error) {
 	return eng.GetGlobal(name)
 }
 
+// RegisterFunction registers a function on an acquired Engine.
+// Note: the registration is local to that Engine instance.
 func (p *AutoGrowEnginePool) RegisterFunction(name string, fn any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -296,6 +324,7 @@ func (p *AutoGrowEnginePool) RegisterFunction(name string, fn any) error {
 	return eng.RegisterFunction(name, fn)
 }
 
+// CallFunction calls the named function on an acquired Engine with the given args.
 func (p *AutoGrowEnginePool) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -305,6 +334,8 @@ func (p *AutoGrowEnginePool) CallFunction(ctx context.Context, name string, args
 	return eng.CallFunction(ctx, name, args...)
 }
 
+// RegisterModule registers a module on an acquired Engine.
+// Note: the registration is local to that Engine instance.
 func (p *AutoGrowEnginePool) RegisterModule(name string, module any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -314,6 +345,7 @@ func (p *AutoGrowEnginePool) RegisterModule(name string, module any) error {
 	return eng.RegisterModule(name, module)
 }
 
+// GetLastError returns the last error from an acquired Engine.
 func (p *AutoGrowEnginePool) GetLastError() error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -323,6 +355,7 @@ func (p *AutoGrowEnginePool) GetLastError() error {
 	return eng.GetLastError()
 }
 
+// ClearError clears the last error on an acquired Engine.
 func (p *AutoGrowEnginePool) ClearError() {
 	eng, err := p.Acquire()
 	if err != nil {

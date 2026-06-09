@@ -18,37 +18,39 @@ func init() {
 	})
 }
 
-// engine JavaScript 脚本引擎实现
+// engine is the JavaScript script engine implementation.
 //
-// 锁使用约定：
-// - 总是先获取 `mu`（或 `mu` 的写锁），然后再获取 `execMu`。
-// - 释放顺序与获取顺序相反（先释放 `execMu`，再释放 `mu`）。
-// - 不要在持有 `execMu` 的情况下再去获取 `mu`，以避免死锁。
-// 该约定用于保护 runtime / programs / initialized 等状态的一致性。
+// Lock ordering convention:
+//   - Always acquire `mu` (or its read lock) before `execMu`.
+//   - Release in reverse order (execMu first, then mu).
+//   - Never acquire `mu` while holding `execMu` to avoid deadlocks.
+//
+// This convention protects the consistency of runtime / programs / initialized.
 type engine struct {
-	runtime  *goja.Runtime   // JavaScript 运行时
-	programs []*goja.Program // 已编译的程序列表
+	runtime  *goja.Runtime   // the JavaScript runtime
+	programs []*goja.Program // compiled programs queued for execution
 
 	initialized bool
 	lastError   error
 
-	mu          sync.RWMutex // 保护 initialized, programs
-	execMu      sync.Mutex   // 保护 runtime
-	lastErrorMu sync.RWMutex // 保护 lastError
+	mu          sync.RWMutex // protects initialized and programs
+	execMu      sync.Mutex   // protects runtime
+	lastErrorMu sync.RWMutex // protects lastError
 }
 
-// newJavascriptEngine 创建 JavaScript 引擎实例
+// newJavascriptEngine creates a JavaScript engine instance.
 func newJavascriptEngine() (*engine, error) {
 	return &engine{
 		initialized: false,
 	}, nil
 }
 
+// GetType returns the script engine type.
 func (e *engine) GetType() scriptEngine.Type {
 	return scriptEngine.JavaScriptType
 }
 
-// Init 初始化引擎
+// Init initializes the engine.
 func (e *engine) Init(_ context.Context) error {
 	newRt := goja.New()
 
@@ -71,7 +73,7 @@ func (e *engine) Init(_ context.Context) error {
 	return nil
 }
 
-// Close 销毁引擎
+// Close destroys the engine and releases underlying resources.
 func (e *engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -95,7 +97,7 @@ func (e *engine) Close() error {
 	return nil
 }
 
-// ClearPrograms 清空已缓存的已编译程序
+// ClearPrograms drops all cached compiled programs.
 func (e *engine) ClearPrograms() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -103,14 +105,14 @@ func (e *engine) ClearPrograms() {
 	e.programs = nil
 }
 
-// IsInitialized 检查是否已初始化
+// IsInitialized reports whether the engine has been initialized.
 func (e *engine) IsInitialized() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.initialized
 }
 
-// LoadString 加载字符串脚本
+// LoadString compiles and queues a script given as a string source.
 func (e *engine) LoadString(_ context.Context, source string) error {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -135,7 +137,7 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	return nil
 }
 
-// LoadFile 加载脚本文件
+// LoadFile reads, compiles and queues a script from the given file path.
 func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -166,7 +168,7 @@ func (e *engine) LoadFile(_ context.Context, filePath string) error {
 	return nil
 }
 
-// LoadReader 从 Reader 加载脚本
+// LoadReader reads, compiles and queues a script from the given io.Reader.
 func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) error {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -182,6 +184,7 @@ func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) err
 	return e.LoadString(ctx, string(source))
 }
 
+// LoadStrings compiles and queues multiple scripts from string sources.
 func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
 	for _, source := range sources {
 		if err := e.LoadString(ctx, source); err != nil {
@@ -191,6 +194,7 @@ func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
 	return nil
 }
 
+// LoadFiles compiles and queues multiple scripts from file paths.
 func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
 	for _, filePath := range filePaths {
 		if err := e.LoadFile(ctx, filePath); err != nil {
@@ -200,7 +204,7 @@ func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
 	return nil
 }
 
-// executeProgram 执行已编译的程序
+// executeProgram runs a single compiled program.
 func (e *engine) executeProgram(ctx context.Context, program *goja.Program) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -210,14 +214,16 @@ func (e *engine) executeProgram(ctx context.Context, program *goja.Program) (any
 	return e.RunProgram(ctx, program)
 }
 
-// ExecuteLoaded 执行已加载的脚本
+// ExecuteLoaded runs every program queued by LoadString/LoadFile/LoadReader
+// and returns the collected results in order.
 func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
 	}
 
-	// 复制 programs 引用，避免执行期间被修改
+	// Snapshot the programs slice so concurrent LoadXxx calls cannot mutate it
+	// while we iterate.
 	e.mu.RLock()
 	progs := make([]*goja.Program, len(e.programs))
 	copy(progs, e.programs)
@@ -232,7 +238,7 @@ func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	for _, p := range progs {
 		res, err := e.RunProgram(ctx, p)
 		if err != nil {
-			// RunProgram 已设置 lastError
+			// RunProgram already recorded lastError.
 			return nil, err
 		}
 		results = append(results, res)
@@ -242,7 +248,7 @@ func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	return results, nil
 }
 
-// ExecuteString 执行字符串脚本
+// ExecuteString compiles and immediately runs the given string source.
 func (e *engine) ExecuteString(ctx context.Context, src string) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -289,13 +295,14 @@ func (e *engine) ExecuteString(ctx context.Context, src string) (any, error) {
 	return result, nil
 }
 
-// ExecuteFile 执行脚本文件
+// ExecuteFile compiles and immediately runs the script at the given file path.
 func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) {
 	if err := e.LoadFile(ctx, filePath); err != nil {
 		return nil, err
 	}
 
-	// ExecuteLoaded 返回一个结果切片（以 any 返回），兼容性处理末尾结果
+	// ExecuteLoaded returns a slice of results (as any); keep only the last one
+	// to match the single-file semantics.
 	resAny, err := e.ExecuteLoaded(ctx)
 	if err != nil {
 		return nil, err
@@ -310,7 +317,7 @@ func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) 
 	return resAny, nil
 }
 
-// RegisterGlobal 注册全局变量
+// RegisterGlobal registers a global variable in the JavaScript runtime.
 func (e *engine) RegisterGlobal(name string, value any) error {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -330,6 +337,8 @@ func (e *engine) RegisterGlobal(name string, value any) error {
 	return nil
 }
 
+// ExecuteStrings compiles and immediately runs multiple string sources,
+// returning each result in order.
 func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
 	results := make([]any, 0, len(sources))
 	for _, src := range sources {
@@ -342,6 +351,8 @@ func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, e
 	return results, nil
 }
 
+// ExecuteFiles compiles and immediately runs multiple file paths,
+// returning each result in order.
 func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
 	results := make([]any, 0, len(filePaths))
 	for _, filePath := range filePaths {
@@ -354,7 +365,7 @@ func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, e
 	return results, nil
 }
 
-// GetGlobal 获取全局变量
+// GetGlobal reads a global variable from the JavaScript runtime.
 func (e *engine) GetGlobal(name string) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -380,7 +391,7 @@ func (e *engine) GetGlobal(name string) (any, error) {
 	return result, nil
 }
 
-// RegisterFunction 注册全局函数
+// RegisterFunction registers a global function in the JavaScript runtime.
 func (e *engine) RegisterFunction(name string, fn any) error {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -401,7 +412,7 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 	return nil
 }
 
-// CallFunction 调用 JavaScript 函数
+// CallFunction calls the named function with args and returns its result.
 func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -468,7 +479,7 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 	return result, nil
 }
 
-// RegisterModule 注册模块
+// RegisterModule registers a module (map[string]any or raw value) under name.
 func (e *engine) RegisterModule(name string, module any) error {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
@@ -497,27 +508,28 @@ func (e *engine) RegisterModule(name string, module any) error {
 	return nil
 }
 
-// GetLastError 获取最后一个错误
+// GetLastError returns the last error recorded by the engine.
 func (e *engine) GetLastError() error {
 	e.lastErrorMu.RLock()
 	defer e.lastErrorMu.RUnlock()
 	return e.lastError
 }
 
+// setLastError records the last error under lastErrorMu.
 func (e *engine) setLastError(err error) {
 	e.lastErrorMu.Lock()
 	defer e.lastErrorMu.Unlock()
 	e.lastError = err
 }
 
-// ClearError 清除错误
+// ClearError clears the last recorded error.
 func (e *engine) ClearError() {
 	e.lastErrorMu.Lock()
 	defer e.lastErrorMu.Unlock()
 	e.lastError = nil
 }
 
-// withRuntime 在受保护的环境中使用 runtime 执行函数
+// withRuntime runs fn while holding execMu, providing safe access to the runtime.
 func (e *engine) withRuntime(fn func(rt *goja.Runtime) (any, error)) (any, error) {
 	e.execMu.Lock()
 	defer e.execMu.Unlock()
@@ -527,7 +539,7 @@ func (e *engine) withRuntime(fn func(rt *goja.Runtime) (any, error)) (any, error
 	return fn(e.runtime)
 }
 
-// RunProgram 运行已编译的程序
+// RunProgram runs a compiled goja program with context cancellation support.
 func (e *engine) RunProgram(ctx context.Context, program *goja.Program) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)

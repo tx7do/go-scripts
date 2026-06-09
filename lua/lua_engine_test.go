@@ -13,32 +13,33 @@ import (
 )
 
 func TestLuaEngine(t *testing.T) {
-	// 创建引擎
+	// Create the engine.
 	eng, err := newLuaEngine()
 	assert.Nil(t, err)
 	assert.NotNil(t, eng)
 	defer eng.Close()
 
-	// 初始化
+	// Initialize.
 	ctx := context.Background()
 	if err = eng.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// 注册全局变量
+	// Register a global variable.
 	err = eng.RegisterGlobal("config", map[string]interface{}{
 		"host": "localhost",
 		"port": 8080,
 	})
 
-	// 执行脚本
+	// Execute a script.
 	result, err := eng.ExecuteString(ctx, `
     function add(a, b)
         return a + b
     end
 `)
+	_ = result
 
-	// 调用函数（带超时）
+	// Call the function with a timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -46,7 +47,7 @@ func TestLuaEngine(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	fmt.Println(result) // 输出: 30
+	fmt.Println(result) // expected: 30
 }
 
 func TestConcurrentCallAndGet(t *testing.T) {
@@ -56,11 +57,11 @@ func TestConcurrentCallAndGet(t *testing.T) {
 	defer eng.Close()
 
 	ctx := context.Background()
-	// 初始化并加载函数与全局变量
+	// Initialize and load the function plus global variable.
 	err = eng.Init(ctx)
 	assert.Nil(t, err)
 
-	// 定义函数 add 并执行以加载到 VM
+	// Define the function `add` and run the snippet so it is loaded into the VM.
 	_, err = eng.ExecuteString(ctx, `
         function add(a, b)
             return a + b
@@ -77,7 +78,7 @@ func TestConcurrentCallAndGet(t *testing.T) {
 	var wg sync.WaitGroup
 	var errCount int64
 
-	// 并发量与每个 goroutine 的循环次数
+	// Concurrency and per-goroutine iteration counts.
 	const goroutines = 50
 	const loops = 200
 
@@ -86,7 +87,7 @@ func TestConcurrentCallAndGet(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < loops; j++ {
-				// 每次操作使用带超时的 ctx
+				// Each operation uses a context with a timeout.
 				cctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				val, callErr := eng.CallFunction(cctx, "add", 10, 20)
 				cancel()
@@ -95,7 +96,7 @@ func TestConcurrentCallAndGet(t *testing.T) {
 					continue
 				}
 
-				// 检查返回值是否为 30
+				// Verify the return value is 30.
 				switch v := val.(type) {
 				case int:
 					if v != 30 {
@@ -113,14 +114,13 @@ func TestConcurrentCallAndGet(t *testing.T) {
 					atomic.AddInt64(&errCount, 1)
 				}
 
-				// 读取全局变量
+				// Read the global variable.
 				gv, gerr := eng.GetGlobal("config")
 				if gerr != nil {
 					atomic.AddInt64(&errCount, 1)
 				} else {
 					if _, ok := gv.(map[string]interface{}); !ok {
-						// convertFromLValue 可能返回 map[string]interface{} or other; accept non-nil
-						// 这里只保证没有 panic 并返回非 nil
+						// convertFromLValue may return map[string]interface{} or other; accept non-nil.
 						if gv == nil {
 							atomic.AddInt64(&errCount, 1)
 						}
@@ -137,7 +137,7 @@ func TestConcurrentCallAndGet(t *testing.T) {
 }
 
 func TestConcurrentInitClose(t *testing.T) {
-	// 该测试检查在并发 Init/Close 下不会导致竞态或 panic
+	// This test ensures concurrent Init/Close does not race or panic.
 	const goroutines = 40
 	const ops = 200
 
@@ -155,23 +155,23 @@ func TestConcurrentInitClose(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < ops; j++ {
-				// 随机选择 Init 或 Close
+				// Alternate between Init and Close.
 				if j%2 == 0 {
 					if err = eng.Init(context.Background()); err != nil {
-						// 允许 ErrLuaEngineAlreadyInitialized
+						// ErrLuaEngineAlreadyInitialized is allowed.
 						if !errors.Is(err, ErrLuaEngineAlreadyInitialized) {
 							atomic.AddInt64(&initErrCount, 1)
 						}
 					}
 				} else {
 					if err = eng.Close(); err != nil {
-						// 允许 ErrLuaEngineNotInitialized
+						// ErrLuaEngineNotInitialized is allowed.
 						if !errors.Is(err, ErrLuaEngineNotInitialized) {
 							atomic.AddInt64(&closeErrCount, 1)
 						}
 					}
 				}
-				// 短暂休眠，增加并发交错
+				// Sleep briefly to increase interleaving.
 				time.Sleep(time.Millisecond)
 			}
 		}(i)
@@ -184,12 +184,12 @@ func TestConcurrentInitClose(t *testing.T) {
 			atomic.LoadInt64(&initErrCount), atomic.LoadInt64(&closeErrCount), eng.GetLastError())
 	}
 
-	// 尝试最终初始化以确保引擎可再次使用
+	// Try a final Init to ensure the engine is reusable.
 	if err = eng.Init(context.Background()); err != nil && !errors.Is(err, ErrLuaEngineAlreadyInitialized) {
 		t.Fatalf("final Init failed: %v", err)
 	}
 
-	// 确保 Close 可正常调用
+	// Ensure Close can be called cleanly.
 	if err = eng.Close(); err != nil && !errors.Is(err, ErrLuaEngineNotInitialized) {
 		t.Fatalf("final Close failed: %v", err)
 	}

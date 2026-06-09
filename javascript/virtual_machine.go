@@ -10,12 +10,17 @@ import (
 	"github.com/dop251/goja_nodejs/require"
 )
 
+// virtualMachine wraps a goja runtime together with a require registry and
+// the currently-loaded program. It is the lower-level building block used by
+// the engine implementation.
 type virtualMachine struct {
 	vm       *goja.Runtime
 	program  *goja.Program
 	registry *require.Registry
 }
 
+// newVirtualMachine creates a virtualMachine with a fresh goja runtime and the
+// standard nodejs modules (require, console, process) enabled.
 func newVirtualMachine() *virtualMachine {
 	exec := &virtualMachine{
 		vm:       goja.New(),
@@ -25,17 +30,19 @@ func newVirtualMachine() *virtualMachine {
 	return exec
 }
 
+// init enables the require/console/process modules on the runtime.
 func (e *virtualMachine) init() {
 	_ = e.registry.Enable(e.vm)
 	console.Enable(e.vm)
 	process.Enable(e.vm)
 }
 
-// Destroy 销毁虚拟机，为了性能考虑，现在只是将之还给虚拟机池。
+// Destroy tears the virtual machine down. For performance reasons this is a
+// no-op for now; recycle via a pool if needed.
 func (e *virtualMachine) Destroy() {
 }
 
-// LoadString 加载字符串，并编译成字节码
+// LoadString compiles the given source string into a goja program.
 func (e *virtualMachine) LoadString(source string) error {
 	program, err := goja.Compile("", source, true)
 	if err != nil {
@@ -47,7 +54,7 @@ func (e *virtualMachine) LoadString(source string) error {
 	return nil
 }
 
-// LoadFile 加载文件，并编译成字节码
+// LoadFile reads and compiles the script at the given file path.
 func (e *virtualMachine) LoadFile(filePath string) error {
 	code, err := os.ReadFile(filePath)
 	if err != nil {
@@ -64,7 +71,7 @@ func (e *virtualMachine) LoadFile(filePath string) error {
 	return nil
 }
 
-// Execute 执行已编译的lua代码
+// Execute runs the previously-compiled program.
 func (e *virtualMachine) Execute() error {
 	if e.program == nil {
 		return errors.New("no js")
@@ -73,13 +80,13 @@ func (e *virtualMachine) Execute() error {
 	return err
 }
 
-// ExecuteString 直接执行字符串
+// ExecuteString immediately runs the given source string.
 func (e *virtualMachine) ExecuteString(source string) error {
 	_, err := e.vm.RunString(source)
 	return err
 }
 
-// ExecuteFile 直接执行lua文件
+// ExecuteFile immediately runs the script at the given file path.
 func (e *virtualMachine) ExecuteFile(filePath string) error {
 	code, err := os.ReadFile(filePath)
 	if err != nil {
@@ -90,13 +97,13 @@ func (e *virtualMachine) ExecuteFile(filePath string) error {
 	return err
 }
 
-// Register 注册方法或者变量到js
+// Register binds a Go value (variable or function) into the JS global scope.
 func (e *virtualMachine) Register(name string, value interface{}) error {
 	err := e.vm.Set(name, value)
 	return err
 }
 
-// GetFunction 获取js中的方法
+// GetFunction exports the JS value named `name` into the Go target `fn`.
 func (e *virtualMachine) GetFunction(name string, fn interface{}) error {
 	err := e.vm.ExportTo(e.vm.Get(name), fn)
 	return err
