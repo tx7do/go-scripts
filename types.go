@@ -1,37 +1,35 @@
 package script_engine
 
-import "time"
-
 // Type identifies a script engine implementation.
 type Type string
 
 const (
-	// LuaType is the Type for Lua script engines.
+	UnknownType Type = "unknown"
+
+	// LuaType is the Lua 5.1 engine powered by gopher-lua.
 	LuaType Type = "lua"
 
-	// JavaScriptType is the Type for JavaScript script engines.
+	// JavaScriptType is the ECMAScript 5.1+ engine powered by goja.
 	JavaScriptType Type = "javascript"
 
-	// PythonType is the Type for Python script engines.
-	PythonType Type = "python"
+	// GPythonType is the pure-Go Python 3.4 engine powered by gpython.
+	GPythonType Type = "gpython"
 
+	// YaegiType is the native Go script engine powered by Traefik Yaegi.
 	YaegiType Type = "yaegi"
 
+	// WazeroType is the WebAssembly engine powered by tetratelabs/wazero.
 	WazeroType Type = "wazero"
 
-	CELType  Type = "cel"
+	// CELType is the Google Common Expression Language powered by cel-go.
+	CELType Type = "cel"
+
+	// ExprType is the lightweight expression engine powered by antonmedv/expr.
 	ExprType Type = "expr"
+
+	// StarlarkType is the hermetic / safe script engine powered by google/starlark-go.
+	StarlarkType Type = "starlark"
+
+	// TclType is the 100 %-compatible Tcl engine powered by modernc.org/tcl.
+	TclType Type = "tcl"
 )
-
-// CallResult holds the return values of a function call.
-type CallResult struct {
-	Values []any
-	Error  error
-}
-
-// ExecuteOptions controls how a script is executed.
-type ExecuteOptions struct {
-	Timeout  time.Duration
-	Globals  map[string]any
-	MaxStack int
-}
