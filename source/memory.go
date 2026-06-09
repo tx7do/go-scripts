@@ -6,10 +6,6 @@ import (
 	"sync"
 )
 
-type memEntry struct {
-	code string
-}
-
 // MemSource keeps scripts in memory.
 // Suitable for dynamic short-lived scripts, unit tests, or RPC-pushed snippets;
 // zero IO overhead.

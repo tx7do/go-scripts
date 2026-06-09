@@ -9,10 +9,6 @@ import (
 // defaultMaxSaved is the default upper bound on recycled LState instances.
 const defaultMaxSaved = 10
 
-func init() {
-	luaPool = newStatePool()
-}
-
 // luaPool is the package-level pool used by newVirtualMachine.
 var luaPool = newStatePool()
 
@@ -56,15 +52,12 @@ func (pl *statePool) SetOptions(opts Lua.Options) {
 	pl.m.Unlock()
 }
 
-// createLuaState creates a new LState using the default options.
+// createLuaState creates a new LState using the pool's current options.
 func (pl *statePool) createLuaState() *Lua.LState {
-	vm := pl.createLuaStateWithOptions(Lua.Options{
-		CallStackSize:       4096,
-		RegistrySize:        4096,
-		SkipOpenLibs:        true,
-		IncludeGoStackTrace: true,
-	})
-	return vm
+	pl.m.Lock()
+	opts := pl.options
+	pl.m.Unlock()
+	return pl.createLuaStateWithOptions(opts)
 }
 
 // createLuaStateWithOptions creates a new LState using the given options.
@@ -83,14 +76,9 @@ func (pl *statePool) Borrow() *Lua.LState {
 		pl.m.Unlock()
 		return x
 	}
-	closed := pl.closed
 	pl.m.Unlock()
 
-	// Pool empty: even if the pool is closed we still create a new state; the
-	// caller may decide whether to keep using it.
-	if closed {
-		return pl.createLuaState()
-	}
+	// Pool is empty; create a new state with the current options.
 	return pl.createLuaState()
 }
 

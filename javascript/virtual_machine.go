@@ -61,7 +61,7 @@ func (e *virtualMachine) LoadFile(filePath string) error {
 		return err
 	}
 
-	program, err := goja.Compile("", string(code), false)
+	program, err := goja.Compile("", string(code), true)
 	if err != nil {
 		return err
 	}
