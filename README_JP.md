@@ -12,12 +12,12 @@
 
 ## ハイライト
 
-- **9 つのエンジン、1 つのインターフェース**: Lua、JavaScript、Python (gpython)、Go (Yaegi)、WebAssembly (Wazero)、CEL、Expr、Starlark、TCL —— 単一の `Engine` インターフェースで、すべてのエンジンがプラグ＆プレイ可能
+- **9 つのエンジン、機能インターフェース**: Lua、JavaScript、Python (gpython)、Go (Yaegi)、WebAssembly (Wazero)、CEL、Expr、Starlark、TCL —— 機能ごとに分割された小インターフェース（`ScriptEngine` / `ScriptLoader` / `ScriptExecutor` / ...）、完全エンジンは `Engine` に集約、軽量エンジンは必要なもののみ実装
 - **ゼロ CGO 依存**: すべてのエンジンがピュア Go 実装、クロスプラットフォームコンパイルがすぐに利用可能、コンテナ化デプロイも追加オーバーヘッドなし
 - **本番グレードのエンジンプール**: 内蔵の固定サイズプール (`EnginePool`) とオートスケーリングプール (`AutoGrowEnginePool`)、高並行スクリプト実行をサポート
 - **マルチテナントエンジン管理**: `Manager` コンポーネントが名前空間分離されたマルチエンジンのライフサイクル管理を提供
 - **マルチソーススクリプト読み込み**: File、Memory、S3、etcd、Consul、Redis、HTTP、および `MultiSource`（Fallback / FirstOK デュアル戦略集約）
-- **ホットリロード**: すべてのエンジンが `StartWatch` / `StopWatch` をサポート、スクリプト変更時に自動リロード、ゼロダウンタイムデプロイ
+- **ホットリロード**: `ScriptWatcher` を実装するエンジンが `StartWatch` / `StopWatch` をサポート、スクリプト変更時に自動リロード、ゼロダウンタイムデプロイ
 - **ホスト相互運用**: グローバル変数の注入、Go 関数の登録、モジュールの登録、スクリプト関数のコールバック —— 双方向のデータブリッジ
 - **スレッドセーフ**: デュアルロックパターン (`RWMutex` + `execMutex`) + Context キャンセル機構で、並行シナリオでのデータ一貫性を保証
 
@@ -103,6 +103,25 @@ graph TB
 
 ---
 
+## インターフェースアーキテクチャ
+
+Go Scripts は**インターフェース分離原則 (ISP)** に基づきエンジンインターフェースを設計しています。source モジュールの `Reader` / `Watcher` / `ReadWatcher` 分離哲学と一致しています：
+
+| インターフェース | メソッド | 説明 |
+| --- | --- | --- |
+| `ScriptEngine` | GetType / Init / Close / IsInitialized / GetLastError / ClearError | **コア**：すべてのエンジンが実装必須 |
+| `ScriptLoader` | SetSource / GetSource / Load / LoadMulti / LoadString | **機能**：ソース駆動スクリプト読み込み |
+| `ScriptExecutor` | Execute / ExecuteFromKey / ExecuteFromKeys / ExecuteString | **機能**：スクリプト実行 |
+| `GlobalAccessor` | RegisterGlobal / GetGlobal | **機能**：グローバル変数読み書き |
+| `FunctionRegistrar` | RegisterFunction / CallFunction | **機能**：関数登録と呼び出し |
+| `ModuleRegistrar` | RegisterModule | **オプション**：モジュールシステム |
+| `ScriptWatcher` | StartWatch / StopWatch | **オプション**：ホットリロード監視 |
+| `Engine` | （上記すべてを集約） | **集約**：Lua / JavaScript などの完全エンジン |
+
+> 呼び出し側は `AsLoader(eng)`、`AsWatcher(eng)` などのヘルパー関数や型アサーションで、エンジンが特定の機能をサポートしているか確認できます。
+
+---
+
 ## コア機能
 
 ### エンジン管理
@@ -151,22 +170,27 @@ graph TB
 
 ```
 go-scripts/
-├── engine.go                     # Engine インターフェース定義
+├── engine.go                     # 機能インターフェース + Engine 集約インターフェース + ヘルパー関数
 ├── factory.go                    # ファクトリレジストリ
 ├── manager.go                    # マルチエンジンマネージャー
 ├── engine_pool.go                # 固定サイズエンジンプール
 ├── engine_pool_autogrow.go       # オートスケーリングエンジンプール
 ├── types.go                      # タイプ定数定義
 ├── source/                       # スクリプトソースモジュール
-│   ├── source.go                 # Reader / Watcher インターフェース
+│   ├── source.go                 # Reader / Watcher / ReadWatcher インターフェース
 │   ├── file.go                   # ローカルファイルソース
+│   ├── fs.go                     # io/fs.FS ソース (embed / zip)
 │   ├── memory.go                 # インメモリソース
-│   ├── multiple.go               # マルチソース集約
+│   ├── multiple.go               # マルチソース集約 (Fallback / FirstOK)
+│   ├── transform.go              # 復号/解凍/フィルタリングミドルウェア
+│   ├── cached.go                 # キャッシュ層 (TTL + Watch 自動無効化)
 │   ├── s3/                       # Amazon S3 / 互換オブジェクトストレージ
 │   ├── etcd/                     # etcd KV
 │   ├── consul/                   # Consul KV
 │   ├── redis/                    # Redis
-│   └── http/                     # HTTP リモートフェッチ
+│   ├── http/                     # HTTP リモートフェッチ
+│   ├── git/                      # Git リポジトリ (go-git/v6)
+│   └── database/                 # SQL データベース (database/sql)
 ├── lua/                          # Lua エンジン (gopher-lua)
 ├── javascript/                   # JavaScript エンジン (goja)
 ├── gpython/                      # Python エンジン (gpython)
@@ -339,6 +363,8 @@ cd tcl && go test -v ./...
 - [Consul ソースドキュメント](source/consul/README_JP.md)
 - [Redis ソースドキュメント](source/redis/README_JP.md)
 - [HTTP ソースドキュメント](source/http/README_JP.md)
+- [Git ソースドキュメント](source/git/README_JP.md)
+- [Database ソースドキュメント](source/database/README_JP.md)
 
 ### 外部リソース
 

@@ -12,12 +12,12 @@ Empower host programs to seamlessly embed 9 scripting languages through a unifie
 
 ## Highlights
 
-- **Nine Engines, One Interface**: Lua, JavaScript, Python (gpython), Go (Yaegi), WebAssembly (Wazero), CEL, Expr, Starlark, TCL — a single `Engine` interface, plug-and-play for all engines.
+- **Nine Engines, Capability Interfaces**: Lua, JavaScript, Python (gpython), Go (Yaegi), WebAssembly (Wazero), CEL, Expr, Starlark, TCL — capability-split small interfaces (`ScriptEngine` / `ScriptLoader` / `ScriptExecutor` / ...), full engines aggregate into `Engine`, lightweight engines implement only what they need.
 - **Zero CGO Dependencies**: All engines are pure-Go implementations, cross-platform compilation out of the box, zero extra overhead for containerized deployment.
 - **Production-Grade Engine Pool**: Built-in fixed-size pool (`EnginePool`) and auto-scaling pool (`AutoGrowEnginePool`) for high-concurrency script execution.
 - **Multi-Tenant Engine Management**: The `Manager` component provides namespace-isolated lifecycle management for multiple engines.
 - **Multi-Source Script Loading**: File, Memory, S3, etcd, Consul, Redis, HTTP, and `MultiSource` (Fallback / FirstOK dual-strategy aggregation).
-- **Hot Reload**: All engines support `StartWatch` / `StopWatch` — automatic script reload on change, zero-downtime deployment.
+- **Hot Reload**: Engines implementing `ScriptWatcher` support `StartWatch` / `StopWatch` — automatic script reload on change, zero-downtime deployment.
 - **Host Interoperation**: Global variable injection, Go function registration, module registration, script function callbacks — bidirectional data bridging.
 - **Thread Safety**: Dual-lock pattern (`RWMutex` + `execMutex`) + Context cancellation ensures data consistency in concurrent scenarios.
 
@@ -103,6 +103,25 @@ graph TB
 
 ---
 
+## Interface Architecture
+
+Go Scripts applies the **Interface Segregation Principle (ISP)** to engine design, consistent with the `Reader` / `Watcher` / `ReadWatcher` separation in the source module:
+
+| Interface | Methods | Description |
+| --- | --- | --- |
+| `ScriptEngine` | GetType / Init / Close / IsInitialized / GetLastError / ClearError | **Core**: all engines must implement |
+| `ScriptLoader` | SetSource / GetSource / Load / LoadMulti / LoadString | **Capability**: source-driven script loading |
+| `ScriptExecutor` | Execute / ExecuteFromKey / ExecuteFromKeys / ExecuteString | **Capability**: script execution |
+| `GlobalAccessor` | RegisterGlobal / GetGlobal | **Capability**: global variable read/write |
+| `FunctionRegistrar` | RegisterFunction / CallFunction | **Capability**: function registration and invocation |
+| `ModuleRegistrar` | RegisterModule | **Optional**: module system |
+| `ScriptWatcher` | StartWatch / StopWatch | **Optional**: hot-reload watching |
+| `Engine` | (aggregates all of the above) | **Aggregate**: Lua / JavaScript and other full engines |
+
+> Callers use helper functions like `AsLoader(eng)`, `AsWatcher(eng)` or type assertions to check whether an engine supports a specific capability.
+
+---
+
 ## Core Features
 
 ### Engine Management
@@ -151,22 +170,27 @@ graph TB
 
 ```
 go-scripts/
-├── engine.go                     # Engine interface definition
+├── engine.go                     # Capability interfaces + Engine aggregate + helper functions
 ├── factory.go                    # Factory registry
 ├── manager.go                    # Multi-engine manager
 ├── engine_pool.go                # Fixed-size engine pool
 ├── engine_pool_autogrow.go       # Auto-scaling engine pool
 ├── types.go                      # Type constant definitions
 ├── source/                       # Script source modules
-│   ├── source.go                 # Reader / Watcher interfaces
+│   ├── source.go                 # Reader / Watcher / ReadWatcher interfaces
 │   ├── file.go                   # Local file source
+│   ├── fs.go                     # io/fs.FS source (embed / zip)
 │   ├── memory.go                 # In-memory source
-│   ├── multiple.go               # Multi-source aggregation
+│   ├── multiple.go               # Multi-source aggregation (Fallback / FirstOK)
+│   ├── transform.go              # Decrypt / decompress / filter middleware
+│   ├── cached.go                 # Cache layer (TTL + Watch auto-invalidation)
 │   ├── s3/                       # Amazon S3 / compatible object storage
 │   ├── etcd/                     # etcd KV
 │   ├── consul/                   # Consul KV
 │   ├── redis/                    # Redis
-│   └── http/                     # HTTP remote fetch
+│   ├── http/                     # HTTP remote fetch
+│   ├── git/                      # Git repository (go-git/v6)
+│   └── database/                 # SQL database (database/sql)
 ├── lua/                          # Lua engine (gopher-lua)
 ├── javascript/                   # JavaScript engine (goja)
 ├── gpython/                      # Python engine (gpython)
@@ -339,6 +363,8 @@ Test coverage:
 - [Consul Source Documentation](source/consul/README_EN.md)
 - [Redis Source Documentation](source/redis/README_EN.md)
 - [HTTP Source Documentation](source/http/README_EN.md)
+- [Git Source Documentation](source/git/README_EN.md)
+- [Database Source Documentation](source/database/README_EN.md)
 
 ### External Resources
 

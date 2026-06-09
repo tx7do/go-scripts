@@ -12,12 +12,12 @@
 
 ## 项目亮点
 
-- **九大引擎，统一接口**：Lua、JavaScript、Python (gpython)、Go (Yaegi)、WebAssembly (Wazero)、CEL、Expr、Starlark、TCL —— 一套 `Engine` 接口，所有引擎即插即用
+- **九大引擎，能力接口**：Lua、JavaScript、Python (gpython)、Go (Yaegi)、WebAssembly (Wazero)、CEL、Expr、Starlark、TCL —— 按能力拆分的小接口（`ScriptEngine` / `ScriptLoader` / `ScriptExecutor` / ...），完整引擎聚合为 `Engine`，轻量引擎按需实现
 - **零 CGO 依赖**：全部引擎均为纯 Go 实现，跨平台编译开箱即用，容器化部署无额外开销
 - **生产级引擎池**：内置固定大小池 (`EnginePool`) 与自动扩容池 (`AutoGrowEnginePool`)，支持高并发脚本执行
 - **多租户引擎管理**：`Manager` 组件提供命名空间隔离的多引擎生命周期管理
 - **多源脚本加载**：File、Memory、S3、etcd、Consul、Redis、HTTP、MultiSource（Fallback / FirstOK 双策略聚合）
-- **热更新**：所有引擎均支持 `StartWatch` / `StopWatch`，脚本变更自动重载，零停机发布
+- **热更新**：实现 `ScriptWatcher` 的引擎支持 `StartWatch` / `StopWatch`，脚本变更自动重载，零停机发布
 - **宿主互操作**：全局变量注入、Go 函数注册、模块注册、脚本函数回调，双向数据桥接
 - **线程安全**：双锁模式 (`RWMutex` + `execMutex`) + Context 取消机制，保障并发场景下的数据一致性
 
@@ -103,6 +103,61 @@ graph TB
 
 ---
 
+## 接口架构
+
+Go Scripts 采用**接口隔离原则 (ISP)** 设计引擎接口，与 source 模块的 `Reader` / `Watcher` / `ReadWatcher` 分离哲学一致：
+
+```mermaid
+graph TB
+    subgraph "核心接口（所有引擎必须实现）"
+        SE["ScriptEngine<br/>GetType / Init / Close / IsInitialized<br/>GetLastError / ClearError"]
+    end
+
+    subgraph "能力接口（按需实现）"
+        SL["ScriptLoader"]
+        SX["ScriptExecutor"]
+        GA["GlobalAccessor"]
+        FR["FunctionRegistrar"]
+        MR["ModuleRegistrar"]
+        SW["ScriptWatcher"]
+    end
+
+    subgraph "聚合接口"
+        ENG["Engine = ScriptEngine + 全部能力接口"]
+    end
+
+    subgraph "完整实现"
+        LUA["Lua ✅"]
+        JS["JavaScript ✅"]
+    end
+
+    subgraph "轻量实现（示例）"
+        CEL["CEL<br/>ScriptEngine + ScriptExecutor"]
+        EXPR["Expr<br/>ScriptEngine + ScriptExecutor"]
+    end
+
+    SE --> ENG
+    SL & SX & GA & FR & MR & SW --> ENG
+    ENG --> LUA & JS
+    SE --> CEL & EXPR
+    SX --> CEL & EXPR
+```
+
+| 接口 | 方法 | 说明 |
+| --- | --- | --- |
+| `ScriptEngine` | GetType / Init / Close / IsInitialized / GetLastError / ClearError | **核心**：所有引擎必须实现 |
+| `ScriptLoader` | SetSource / GetSource / Load / LoadMulti / LoadString | **能力**：源驱动脚本加载 |
+| `ScriptExecutor` | Execute / ExecuteFromKey / ExecuteFromKeys / ExecuteString | **能力**：脚本执行 |
+| `GlobalAccessor` | RegisterGlobal / GetGlobal | **能力**：全局变量读写 |
+| `FunctionRegistrar` | RegisterFunction / CallFunction | **能力**：函数注册与调用 |
+| `ModuleRegistrar` | RegisterModule | **可选**：模块系统 |
+| `ScriptWatcher` | StartWatch / StopWatch | **可选**：热更新监听 |
+| `Engine` | （聚合上述全部） | **聚合**：Lua / JavaScript 等完整引擎 |
+
+> 调用方通过 `AsLoader(eng)`、`AsWatcher(eng)` 等辅助函数或类型断言检测引擎是否支持特定能力。
+
+---
+
 ## 核心功能
 
 ### 引擎管理
@@ -151,22 +206,27 @@ graph TB
 
 ```
 go-scripts/
-├── engine.go                     # Engine 接口定义
+├── engine.go                     # 能力接口 + Engine 聚合接口 + 辅助函数
 ├── factory.go                    # 工厂注册表
 ├── manager.go                    # 多引擎管理器
 ├── engine_pool.go                # 固定大小引擎池
 ├── engine_pool_autogrow.go       # 自动扩容引擎池
 ├── types.go                      # 类型常量定义
 ├── source/                       # 脚本来源模块
-│   ├── source.go                 # Reader / Watcher 接口
+│   ├── source.go                 # Reader / Watcher / ReadWatcher 接口
 │   ├── file.go                   # 本地文件源
+│   ├── fs.go                     # io/fs.FS 源 (embed / zip)
 │   ├── memory.go                 # 内存源
-│   ├── multiple.go               # 多源聚合
+│   ├── multiple.go               # 多源聚合 (Fallback / FirstOK)
+│   ├── transform.go              # 解密/解压/过滤中间件
+│   ├── cached.go                 # 缓存层 (TTL + Watch 自动失效)
 │   ├── s3/                       # Amazon S3 / 兼容对象存储
 │   ├── etcd/                     # etcd KV
 │   ├── consul/                   # Consul KV
 │   ├── redis/                    # Redis
-│   └── http/                     # HTTP 远程拉取
+│   ├── http/                     # HTTP 远程拉取
+│   ├── git/                      # Git 仓库 (go-git/v6)
+│   └── database/                 # SQL 数据库 (database/sql)
 ├── lua/                          # Lua 引擎 (gopher-lua)
 ├── javascript/                   # JavaScript 引擎 (goja)
 ├── gpython/                      # Python 引擎 (gpython)
@@ -339,6 +399,8 @@ cd tcl && go test -v ./...
 - [Consul Source 文档](source/consul/README.md)
 - [Redis Source 文档](source/redis/README.md)
 - [HTTP Source 文档](source/http/README.md)
+- [Git Source 文档](source/git/README.md)
+- [Database Source 文档](source/database/README.md)
 
 ### 外部资源
 

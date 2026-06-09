@@ -369,6 +369,31 @@ func (p *AutoGrowEnginePool) RegisterModule(name string, module any) error {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Hot Reload (Watch)
+////////////////////////////////////////////////////////////////////////////////
+
+// StartWatch starts watching the script identified by `key` on an acquired Engine.
+// Note: the watch is LOCAL to that Engine instance.
+func (p *AutoGrowEnginePool) StartWatch(ctx context.Context, key string) error {
+	eng, err := p.Acquire()
+	if err != nil {
+		return err
+	}
+	defer p.Release(eng)
+	return eng.StartWatch(ctx, key)
+}
+
+// StopWatch stops watching the script identified by `key` on an acquired Engine.
+func (p *AutoGrowEnginePool) StopWatch(key string) error {
+	eng, err := p.Acquire()
+	if err != nil {
+		return err
+	}
+	defer p.Release(eng)
+	return eng.StopWatch(key)
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Error handling
 ////////////////////////////////////////////////////////////////////////////////
 
