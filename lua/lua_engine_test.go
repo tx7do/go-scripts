@@ -13,7 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	scriptEngine "github.com/tx7do/go-scripts"
+
+	"github.com/tx7do/go-scripts/source"
 )
 
 func TestLuaEngine(t *testing.T) {
@@ -207,9 +208,9 @@ func TestConcurrentInitClose(t *testing.T) {
 
 // newMemSourceWith returns a MemSource pre-populated with the given key=code
 // pairs.
-func newMemSourceWith(t *testing.T, scripts map[string]string) *scriptEngine.MemSource {
+func newMemSourceWith(t *testing.T, scripts map[string]string) *source.MemSource {
 	t.Helper()
-	src := scriptEngine.NewMemSource()
+	src := source.NewMemSource()
 	for k, v := range scripts {
 		src.Set(k, v)
 	}
@@ -380,7 +381,7 @@ func TestLuaEngine_Load_FromFileSource(t *testing.T) {
 	defer eng.Close()
 	require.NoError(t, eng.Init(context.Background()))
 
-	eng.SetSource(scriptEngine.NewFileSource())
+	eng.SetSource(source.NewFileSource())
 	require.NoError(t, eng.Load(context.Background(), path))
 
 	_, err = eng.Execute(context.Background())
@@ -390,3 +391,136 @@ func TestLuaEngine_Load_FromFileSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(123), v)
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// Hot Reload (Watch)
+////////////////////////////////////////////////////////////////////////////////
+
+func TestLuaEngine_StartWatch_HotReload(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	memSrc := newMemSourceWith(t, map[string]string{
+		"k": "val = 1",
+	})
+	eng.SetSource(memSrc)
+
+	// Load and execute initially.
+	require.NoError(t, eng.Load(context.Background(), "k"))
+	_, err = eng.Execute(context.Background())
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("val")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), v)
+
+	// Start watching.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, eng.StartWatch(ctx, "k"))
+
+	// Modify the script.
+	time.Sleep(50 * time.Millisecond)
+	memSrc.Set("k", "val = 2")
+
+	// Wait a bit for the hot reload to trigger.
+	time.Sleep(200 * time.Millisecond)
+
+	// Execute again to verify the reloaded script.
+	_, err = eng.Execute(context.Background())
+	require.NoError(t, err)
+	v, err = eng.GetGlobal("val")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), v)
+}
+
+func TestLuaEngine_StartWatch_NoSource(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	err = eng.StartWatch(context.Background(), "k")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no source")
+}
+
+func TestLuaEngine_StartWatch_SourceNotWatcher(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// fakeSourceOnly implements Reader but not Watcher.
+	eng.SetSource(&readerOnly{code: "val = 1"})
+
+	err = eng.StartWatch(context.Background(), "k")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not implement Watcher")
+}
+
+func TestLuaEngine_StopWatch(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	memSrc := newMemSourceWith(t, map[string]string{"k": "val = 1"})
+	eng.SetSource(memSrc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Start then stop.
+	require.NoError(t, eng.StartWatch(ctx, "k"))
+	require.NoError(t, eng.StopWatch("k"))
+
+	// Modify after stop should NOT trigger reload.
+	memSrc.Set("k", "val = 99")
+	time.Sleep(200 * time.Millisecond)
+
+	// No reload happened.
+	require.NoError(t, eng.Load(context.Background(), "k"))
+	_, err = eng.Execute(context.Background())
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("val")
+	require.NoError(t, err)
+	assert.Equal(t, int64(99), v) // manual Load, not hot reload
+}
+
+func TestLuaEngine_Close_StopsWatchers(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NoError(t, eng.Init(context.Background()))
+
+	memSrc := newMemSourceWith(t, map[string]string{"k": "val = 1"})
+	eng.SetSource(memSrc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, eng.StartWatch(ctx, "k"))
+
+	// Close should clean up watchers without blocking.
+	done := make(chan struct{})
+	go func() {
+		require.NoError(t, eng.Close())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked; watchers not cleaned up")
+	}
+}
+
+// readerOnly implements source.Reader but NOT source.Watcher.
+type readerOnly struct {
+	code string
+}
+
+func (r *readerOnly) Load(_ context.Context, _ string) (string, error) { return r.code, nil }
+func (r *readerOnly) Close() error                                     { return nil }

@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tx7do/go-scripts/source"
 )
 
 // mockEngine is a minimal Engine implementation for testing the root-module
@@ -22,7 +24,7 @@ type mockEngine struct {
 	initialized bool
 
 	// Captured observations.
-	source     Source
+	source     source.Reader
 	lastKey    string
 	lastCode   string
 	loaded     int
@@ -80,13 +82,13 @@ func (m *mockEngine) IsInitialized() bool {
 	return m.initialized
 }
 
-func (m *mockEngine) SetSource(s Source) {
+func (m *mockEngine) SetSource(s source.Reader) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.source = s
 }
 
-func (m *mockEngine) GetSource() Source {
+func (m *mockEngine) GetSource() source.Reader {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.source
@@ -207,6 +209,9 @@ func (m *mockEngine) ClearError() {
 	defer m.mu.Unlock()
 	m.lastError = nil
 }
+
+func (m *mockEngine) StartWatch(_ context.Context, _ string) error { return nil }
+func (m *mockEngine) StopWatch(_ string) error                     { return nil }
 
 // mockEngineFactory produces mock engines of a fixed type and remembers every
 // instance it created. Useful for pool tests that need to count live engines.

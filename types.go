@@ -15,9 +15,10 @@ const (
 	// PythonType is the Type for Python script engines.
 	PythonType Type = "python"
 
-	GoType Type = "go"
+	YaegiType Type = "yaegi"
 
-	WASMType Type = "wasm"
+	WazeroType Type = "wazero"
+
 	CELType  Type = "cel"
 	ExprType Type = "expr"
 )

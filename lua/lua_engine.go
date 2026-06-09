@@ -8,6 +8,7 @@ import (
 	Lua "github.com/yuin/gopher-lua"
 
 	scriptEngine "github.com/tx7do/go-scripts"
+	"github.com/tx7do/go-scripts/source"
 )
 
 func init() {
@@ -22,15 +23,20 @@ type engine struct {
 	initialized bool
 	lastError   error
 
-	source      scriptEngine.Source // optional script source (File / S3 / Mem / ...)
-	mu          sync.RWMutex        // protects vm, initialized and source
-	lastErrorMu sync.Mutex          // protects lastError
+	source      source.Reader // optional script source (File / S3 / Mem / ...)
+	mu          sync.RWMutex  // protects vm, initialized and source
+	lastErrorMu sync.Mutex    // protects lastError
+
+	// Hot reload state
+	watchers   map[string]context.CancelFunc // key -> cancel func for the watch goroutine
+	watchersMu sync.Mutex                    // protects watchers
 }
 
 // newLuaEngine creates a Lua engine instance.
 func newLuaEngine() (*engine, error) {
 	return &engine{
 		initialized: false,
+		watchers:    make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -66,6 +72,9 @@ func (e *engine) Close() error {
 		return ErrLuaEngineNotInitialized
 	}
 
+	// Stop all active watchers.
+	e.stopAllWatchers()
+
 	e.vm.Destroy()
 	e.vm = nil
 	e.initialized = false
@@ -87,14 +96,14 @@ func (e *engine) IsInitialized() bool {
 // SetSource binds a ScriptSource (FileSource / S3 / Mem / Multi / ...) to the
 // engine. Subsequent Load / LoadMulti / ExecuteFromKey / ExecuteFromKeys calls
 // read through it. Passing nil clears any previously bound source.
-func (e *engine) SetSource(source scriptEngine.Source) {
+func (e *engine) SetSource(source source.Reader) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.source = source
 }
 
 // GetSource returns the currently bound ScriptSource, or nil if none has been set.
-func (e *engine) GetSource() scriptEngine.Source {
+func (e *engine) GetSource() source.Reader {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.source
@@ -454,4 +463,82 @@ func (e *engine) ClearError() {
 	defer e.lastErrorMu.Unlock()
 
 	e.lastError = nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Hot Reload (Watch)
+////////////////////////////////////////////////////////////////////////////////
+
+// StartWatch starts watching the script identified by `key` for changes.
+// When the source reports a change, the script is automatically reloaded.
+// Returns an error if the source is not bound or doesn't implement Watcher.
+func (e *engine) StartWatch(ctx context.Context, key string) error {
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return ErrLuaEngineNotInitialized
+	}
+
+	e.mu.RLock()
+	src := e.source
+	e.mu.RUnlock()
+	if src == nil {
+		err := fmt.Errorf("lua engine: no source bound")
+		e.setLastError(err)
+		return err
+	}
+
+	watcher, ok := src.(source.Watcher)
+	if !ok {
+		err := fmt.Errorf("lua engine: source does not implement Watcher")
+		e.setLastError(err)
+		return err
+	}
+
+	// Stop existing watch for the same key if any.
+	e.StopWatch(key)
+
+	watchCtx, cancel := context.WithCancel(ctx)
+
+	e.watchersMu.Lock()
+	e.watchers[key] = cancel
+	e.watchersMu.Unlock()
+
+	go func() {
+		ch, err := watcher.Watch(watchCtx, key)
+		if err != nil {
+			cancel()
+			return
+		}
+		for range ch {
+			// Reload the script on change signal.
+			if loadErr := e.Load(watchCtx, key); loadErr != nil {
+				// Log but don't stop watching; the source may recover.
+				scriptEngine.GetLogger().Warn(watchCtx, "lua engine: hot reload failed",
+					"key", key, "error", loadErr)
+			}
+		}
+	}()
+
+	return nil
+}
+
+// StopWatch stops watching the script identified by `key`.
+func (e *engine) StopWatch(key string) error {
+	e.watchersMu.Lock()
+	defer e.watchersMu.Unlock()
+	if cancel, ok := e.watchers[key]; ok {
+		cancel()
+		delete(e.watchers, key)
+	}
+	return nil
+}
+
+// stopAllWatchers cancels all active watch goroutines. Caller must hold e.mu.
+func (e *engine) stopAllWatchers() {
+	e.watchersMu.Lock()
+	defer e.watchersMu.Unlock()
+	for key, cancel := range e.watchers {
+		cancel()
+		delete(e.watchers, key)
+	}
 }
