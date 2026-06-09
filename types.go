@@ -14,6 +14,12 @@ const (
 
 	// PythonType is the Type for Python script engines.
 	PythonType Type = "python"
+
+	GoType Type = "go"
+
+	WASMType Type = "wasm"
+	CELType  Type = "cel"
+	ExprType Type = "expr"
 )
 
 // CallResult holds the return values of a function call.

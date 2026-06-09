@@ -5,7 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/go-kratos/kratos/v2/log"
+	scriptEngine "github.com/tx7do/go-scripts"
+
 	"github.com/tengattack/gluacrypto"
 	libs "github.com/vadv/gopher-lua-libs"
 	"github.com/yuin/gluamapper"
@@ -137,7 +138,7 @@ func (e *virtualMachine) PCall(f string, args ...interface{}) {
 		e.L.Push(val)
 	}
 	if err := e.L.PCall(len(args), -1, nil); err != nil {
-		log.Errorf("lua pcall err:%v", err)
+		scriptEngine.GetLogger().Error(nil, "lua pcall error", "func", f, "err", err)
 	}
 }
 
@@ -148,7 +149,7 @@ func (e *virtualMachine) PCall2(f string, args ...Lua.LValue) {
 		e.L.Push(arg)
 	}
 	if err := e.L.PCall(len(args), -1, nil); err != nil {
-		log.Errorf("lua pcall2 err:%v", err)
+		scriptEngine.GetLogger().Error(nil, "lua pcall2 error", "func", f, "err", err)
 	}
 }
 
@@ -159,7 +160,7 @@ func (e *virtualMachine) PCall3(f Lua.LValue, args ...Lua.LValue) {
 		e.L.Push(arg)
 	}
 	if err := e.L.PCall(len(args), -1, nil); err != nil {
-		log.Errorf("lua pcall3 err:%v", err)
+		scriptEngine.GetLogger().Error(nil, "lua pcall3 error", "err", err)
 	}
 }
 
@@ -280,7 +281,7 @@ func (e *virtualMachine) convertFromLValue(lv Lua.LValue) interface{} {
 			return ret
 		}
 	default:
-		log.Errorf("error lua type %v", lv)
+		scriptEngine.GetLogger().Error(nil, "unsupported lua type", "type", fmt.Sprintf("%T", lv), "value", lv)
 		return nil
 	}
 }
