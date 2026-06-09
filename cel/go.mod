@@ -7,7 +7,7 @@ replace github.com/tx7do/go-scripts => ../
 require (
 	github.com/google/cel-go v0.28.0
 	github.com/stretchr/testify v1.11.1
-	github.com/tx7do/go-scripts v0.0.5
+	github.com/tx7do/go-scripts v0.0.6
 )
 
 require (

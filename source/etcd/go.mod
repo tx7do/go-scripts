@@ -6,7 +6,7 @@ replace github.com/tx7do/go-scripts => ../../
 
 require (
 	github.com/stretchr/testify v1.11.1
-	github.com/tx7do/go-scripts v0.0.5
+	github.com/tx7do/go-scripts v0.0.6
 	go.etcd.io/etcd/api/v3 v3.6.10
 	go.etcd.io/etcd/client/v3 v3.6.10
 )
