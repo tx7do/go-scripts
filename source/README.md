@@ -10,7 +10,7 @@
 
 ## 概述
 
-Source 模块定义了脚本来源的核心接口，为所有引擎提供统一的脚本加载和热更新能力。它包含三个核心接口和五种内置实现。
+Source 模块定义了脚本来源的核心接口，为所有引擎提供统一的脚本加载和热更新能力。它包含三个核心接口、六种内置实现和多个扩展子模块。
 
 ### 核心接口
 
@@ -19,6 +19,7 @@ Source 模块定义了脚本来源的核心接口，为所有引擎提供统一�
 | `Reader` | 脚本加载接口，`Load(ctx, key)` 按键加载脚本源码 |
 | `Watcher` | 变更监听接口，`Watch(ctx, key)` 返回变更通知 channel |
 | `ReadWatcher` | `Reader` + `Watcher` 组合接口 |
+| `TransformFunc` | 源码变换钩子，用于解密/解压/过滤（中间件模式） |
 
 ### 内置实现
 
@@ -28,6 +29,8 @@ Source 模块定义了脚本来源的核心接口，为所有引擎提供统一�
 | `FileSystemSource` | `fs.go` | 不支持（不可变源） | 基于 `io/fs.FS`（embed / zip / os.DirFS） |
 | `MemSource` | `memory.go` | 内嵌 channel 通知 | 内存存储，用于测试和注入 |
 | `MultiSource` | `multiple.go` | 转发子 Source 事件 | 多源聚合（Fallback / FirstOK） |
+| `TransformSource` | `transform.go` | 透传内部源 | **中间件**：解密/解压/过滤钩子链 |
+| `CachedSource` | `cached.go` | 自动失效缓存 | **缓存层**：内存缓存 + TTL + Watch 自动失效 |
 
 ### 扩展子模块
 
@@ -102,7 +105,66 @@ func main() {
     // Fallback 聚合（File → Memory 回退）
     multi, _ := source.NewFallbackSource(fileSrc, memSrc)
     code, _ = multi.Load(ctx, "backup.lua")
+
+    // CachedSource：S3 远程源 + 内存缓存
+    // cached, _ := source.NewCachedSource(s3Source, source.WithTTL(5*time.Minute))
+    // defer cached.Close()
+    // code, _ = cached.Load(ctx, "script.lua")
+
+    // TransformSource：解密中间件
+    // decrypt := source.TransformFunc(func(key, raw string) (string, error) {
+    //     return aesDecrypt(raw, secretKey)
+    // })
+    // transformSrc, _ := source.NewTransformSource(cached, decrypt)
+    // defer transformSrc.Close()
+    // code, _ = transformSrc.Load(ctx, "script.lua")
 }
+```
+
+---
+
+## TransformSource 源码变换中间件
+
+`TransformSource` 在 `Load` 之后、返回给引擎之前，对脚本源码执行可配置的变换链。
+
+典型场景：
+- **解密**：S3 / Git / DB 中存储的 AES/XXTEA 加密脚本
+- **解压**：gzip / zstd 压缩的脚本
+- **过滤**：去除敏感信息、编码转换
+
+```go
+// 解密钩子
+decrypt := source.TransformFunc(func(key string, raw string) (string, error) {
+    return aesDecrypt(raw, secretKey)
+})
+
+// 包装 S3 Source
+src, _ := source.NewTransformSource(s3Source, decrypt)
+
+// 链式追加：解密后再解压
+src, _ = src.Then(decompress)
+```
+
+---
+
+## CachedSource 缓存层
+
+`CachedSource` 在远程源（S3 / DB / HTTP）之上添加内存缓存，大幅减少网络 IO。
+
+特性：
+- 缓存命中时零网络开销
+- 支持 TTL 自动过期（`WithTTL`）
+- 如果远程源实现 `Watcher`，变更信号自动失效缓存
+- 支持手动失效（`Invalidate` / `InvalidateAll`）
+
+```go
+// S3 + 内存缓存，TTL 5 分钟
+cached, _ := source.NewCachedSource(s3Source, source.WithTTL(5*time.Minute))
+
+// 叠加解密中间件
+decrypted, _ := source.NewTransformSource(cached, decrypt)
+
+code, _ := decrypted.Load(ctx, "script.lua")
 ```
 
 ---

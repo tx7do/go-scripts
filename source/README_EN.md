@@ -10,7 +10,7 @@
 
 ## Overview
 
-The Source module defines the core interfaces for script sources, providing unified script loading and hot-reload capabilities for all engines. It contains three core interfaces and five built-in implementations.
+The Source module defines the core interfaces for script sources, providing unified script loading and hot-reload capabilities for all engines. It contains three core interfaces, six built-in implementations, and multiple extension sub-modules.
 
 ### Core Interfaces
 
@@ -19,6 +19,7 @@ The Source module defines the core interfaces for script sources, providing unif
 | `Reader` | Script loading interface, `Load(ctx, key)` loads script source by key |
 | `Watcher` | Change watching interface, `Watch(ctx, key)` returns a change notification channel |
 | `ReadWatcher` | `Reader` + `Watcher` combined interface |
+| `TransformFunc` | Source transform hook for decryption / decompression / filtering (middleware pattern) |
 
 ### Built-in Implementations
 
@@ -28,6 +29,8 @@ The Source module defines the core interfaces for script sources, providing unif
 | `FileSystemSource` | `fs.go` | Not supported (immutable sources) | Based on `io/fs.FS` (embed / zip / os.DirFS) |
 | `MemSource` | `memory.go` | Embedded channel notification | In-memory storage, for testing and injection |
 | `MultiSource` | `multiple.go` | Forwards child Source events | Multi-source aggregation (Fallback / FirstOK) |
+| `TransformSource` | `transform.go` | Pass-through from inner source | **Middleware**: decryption / decompression / filtering hook chain |
+| `CachedSource` | `cached.go` | Auto-invalidating cache | **Cache layer**: in-memory cache + TTL + Watch auto-invalidation |
 
 ### Extension Sub-modules
 
@@ -102,7 +105,66 @@ func main() {
     // Fallback aggregation (File → Memory fallback)
     multi, _ := source.NewFallbackSource(fileSrc, memSrc)
     code, _ = multi.Load(ctx, "backup.lua")
+
+    // CachedSource: S3 remote + in-memory cache
+    // cached, _ := source.NewCachedSource(s3Source, source.WithTTL(5*time.Minute))
+    // defer cached.Close()
+    // code, _ = cached.Load(ctx, "script.lua")
+
+    // TransformSource: decryption middleware
+    // decrypt := source.TransformFunc(func(key, raw string) (string, error) {
+    //     return aesDecrypt(raw, secretKey)
+    // })
+    // transformSrc, _ := source.NewTransformSource(cached, decrypt)
+    // defer transformSrc.Close()
+    // code, _ = transformSrc.Load(ctx, "script.lua")
 }
+```
+
+---
+
+## TransformSource Middleware
+
+`TransformSource` applies a configurable transform chain to the loaded source code, after `Load` returns from the inner reader but before handing it to the engine.
+
+Typical use cases:
+- **Decryption**: AES/XXTEA encrypted scripts stored in S3 / Git / DB
+- **Decompression**: gzip / zstd compressed scripts
+- **Filtering**: strip sensitive info, encoding conversion
+
+```go
+// Decryption hook
+decrypt := source.TransformFunc(func(key string, raw string) (string, error) {
+    return aesDecrypt(raw, secretKey)
+})
+
+// Wrap S3 Source
+src, _ := source.NewTransformSource(s3Source, decrypt)
+
+// Chain: decrypt then decompress
+src, _ = src.Then(decompress)
+```
+
+---
+
+## CachedSource Cache Layer
+
+`CachedSource` adds an in-memory cache on top of a remote source (S3 / DB / HTTP), dramatically reducing network IO.
+
+Features:
+- Zero network overhead on cache hit
+- TTL-based auto-expiry (`WithTTL`)
+- If the remote source implements `Watcher`, watch signals auto-invalidate the cache
+- Manual invalidation (`Invalidate` / `InvalidateAll`)
+
+```go
+// S3 + in-memory cache, 5-minute TTL
+cached, _ := source.NewCachedSource(s3Source, source.WithTTL(5*time.Minute))
+
+// Layer decryption middleware on top
+decrypted, _ := source.NewTransformSource(cached, decrypt)
+
+code, _ := decrypted.Load(ctx, "script.lua")
 ```
 
 ---

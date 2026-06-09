@@ -10,7 +10,7 @@
 
 ## 概要
 
-Source モジュールはスクリプトソースのコアインターフェースを定義し、すべてのエンジンに統一されたスクリプト読み込みとホットリロード機能を提供します。3 つのコアインターフェースと 5 つの組み込み実装を含みます。
+Source モジュールはスクリプトソースのコアインターフェースを定義し、すべてのエンジンに統一されたスクリプト読み込みとホットリロード機能を提供します。3 つのコアインターフェース、6 つの組み込み実装、および複数の拡張サブモジュールを含みます。
 
 ### コアインターフェース
 
@@ -19,6 +19,7 @@ Source モジュールはスクリプトソースのコアインターフェー�
 | `Reader` | スクリプト読み込み、`Load(ctx, key)` でキーごとにソースを取得 |
 | `Watcher` | 変更監視、`Watch(ctx, key)` で変更通知チャネルを返す |
 | `ReadWatcher` | `Reader` + `Watcher` 統合インターフェース |
+| `TransformFunc` | ソース変換フック、復号・解凍・フィルタリング用（ミドルウェアパターン） |
 
 ### 組み込み実装
 
@@ -28,6 +29,8 @@ Source モジュールはスクリプトソースのコアインターフェー�
 | `FileSystemSource` | `fs.go` | 非対応（不変ソース） | `io/fs.FS` ベース（embed / zip / os.DirFS） |
 | `MemSource` | `memory.go` | 組み込みチャネル通知 | メモリストレージ、テスト・注入用 |
 | `MultiSource` | `multiple.go` | 子 Source のイベント転送 | マルチソース集約（Fallback / FirstOK） |
+| `TransformSource` | `transform.go` | 内部ソースからのパススルー | **ミドルウェア**：復号・解凍・フィルタリングフックチェーン |
+| `CachedSource` | `cached.go` | 自動無効化キャッシュ | **キャッシュ層**：メモリキャッシュ + TTL + Watch 自動無効化 |
 
 ### 拡張サブモジュール
 
@@ -96,7 +99,66 @@ func main() {
     multi, _ := source.NewFallbackSource(fileSrc, memSrc)
     code, _ = multi.Load(ctx, "backup.lua")
     fmt.Println(code)
+
+    // CachedSource：S3 リモートソース + メモリキャッシュ
+    // cached, _ := source.NewCachedSource(s3Source, source.WithTTL(5*time.Minute))
+    // defer cached.Close()
+    // code, _ = cached.Load(ctx, "script.lua")
+
+    // TransformSource：復号ミドルウェア
+    // decrypt := source.TransformFunc(func(key, raw string) (string, error) {
+    //     return aesDecrypt(raw, secretKey)
+    // })
+    // transformSrc, _ := source.NewTransformSource(cached, decrypt)
+    // defer transformSrc.Close()
+    // code, _ = transformSrc.Load(ctx, "script.lua")
 }
+```
+
+---
+
+## TransformSource ソース変換ミドルウェア
+
+`TransformSource` は `Load` の後、エンジンに返す前に、スクリプトソースに対して設定可能な変換チェーンを適用します。
+
+典型的なユースケース：
+- **復号**：S3 / Git / DB に保存された AES/XXTEA 暗号化スクリプト
+- **解凍**：gzip / zstd 圧縮スクリプト
+- **フィルタリング**：機密情報の除去、エンコーディング変換
+
+```go
+// 復号フック
+decrypt := source.TransformFunc(func(key string, raw string) (string, error) {
+    return aesDecrypt(raw, secretKey)
+})
+
+// S3 Source をラップ
+src, _ := source.NewTransformSource(s3Source, decrypt)
+
+// チェーン：復号後に解凍
+src, _ = src.Then(decompress)
+```
+
+---
+
+## CachedSource キャッシュ層
+
+`CachedSource` はリモートソース（S3 / DB / HTTP）の上にメモリキャッシュを追加し、ネットワーク IO を大幅に削減します。
+
+特徴：
+- キャッシュヒット時にネットワークオーバーヘッドゼロ
+- TTL 自動期限切れ対応（`WithTTL`）
+- リモートソースが `Watcher` を実装している場合、変更シグナルが自動的にキャッシュを無効化
+- 手動無効化（`Invalidate` / `InvalidateAll`）
+
+```go
+// S3 + メモリキャッシュ、TTL 5 分
+cached, _ := source.NewCachedSource(s3Source, source.WithTTL(5*time.Minute))
+
+// 復号ミドルウェアを上に重ねる
+decrypted, _ := source.NewTransformSource(cached, decrypt)
+
+code, _ := decrypted.Load(ctx, "script.lua")
 ```
 
 ---
