@@ -25,6 +25,7 @@ The Source module defines the core interfaces for script sources, providing unif
 | Implementation | File | Hot-Reload Mechanism | Description |
 | --- | --- | --- | --- |
 | `FileSource` | `file.go` | mtime polling | Local filesystem |
+| `FileSystemSource` | `fs.go` | Not supported (immutable sources) | Based on `io/fs.FS` (embed / zip / os.DirFS) |
 | `MemSource` | `memory.go` | Embedded channel notification | In-memory storage, for testing and injection |
 | `MultiSource` | `multiple.go` | Forwards child Source events | Multi-source aggregation (Fallback / FirstOK) |
 
@@ -71,6 +72,7 @@ package main
 import (
     "context"
     "fmt"
+    "os"
     "github.com/tx7do/go-scripts/source"
 )
 
@@ -82,6 +84,12 @@ func main() {
     defer fileSrc.Close()
     code, _ := fileSrc.Load(ctx, "/path/to/script.lua")
     fmt.Println(code)
+
+    // Using FileSystemSource (based on io/fs.FS)
+    // Works with go:embed, archive/zip, os.DirFS, etc.
+    fsSrc, _ := source.NewFileSystemSource(os.DirFS("/scripts"))
+    defer fsSrc.Close()
+    code, _ = fsSrc.Load(ctx, "hello.lua")
 
     // Using MemSource
     memSrc := source.NewMemSource()

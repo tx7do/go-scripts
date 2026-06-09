@@ -25,6 +25,7 @@ Source 模块定义了脚本来源的核心接口，为所有引擎提供统一�
 | 实现 | 文件 | 热更新机制 | 说明 |
 | --- | --- | --- | --- |
 | `FileSource` | `file.go` | mtime 轮询 | 本地文件系统 |
+| `FileSystemSource` | `fs.go` | 不支持（不可变源） | 基于 `io/fs.FS`（embed / zip / os.DirFS） |
 | `MemSource` | `memory.go` | 内嵌 channel 通知 | 内存存储，用于测试和注入 |
 | `MultiSource` | `multiple.go` | 转发子 Source 事件 | 多源聚合（Fallback / FirstOK） |
 
@@ -71,6 +72,7 @@ package main
 import (
     "context"
     "fmt"
+    "os"
     "github.com/tx7do/go-scripts/source"
 )
 
@@ -82,6 +84,12 @@ func main() {
     defer fileSrc.Close()
     code, _ := fileSrc.Load(ctx, "/path/to/script.lua")
     fmt.Println(code)
+
+    // 使用 FileSystemSource（基于 io/fs.FS）
+    // 适用于 go:embed、archive/zip、os.DirFS 等
+    fsSrc, _ := source.NewFileSystemSource(os.DirFS("/scripts"))
+    defer fsSrc.Close()
+    code, _ = fsSrc.Load(ctx, "hello.lua")
 
     // 使用 MemSource
     memSrc := source.NewMemSource()

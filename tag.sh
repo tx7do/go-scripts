@@ -15,5 +15,6 @@ git tag source/etcd/v0.0.1 --force
 git tag source/http/v0.0.1 --force
 git tag source/redis/v0.0.1 --force
 git tag source/s3/v0.0.1 --force
+git tag source/git/v0.0.1 --force
 
 git push origin --tags

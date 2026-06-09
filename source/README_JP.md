@@ -25,6 +25,7 @@ Source モジュールはスクリプトソースのコアインターフェー�
 | 実装 | ファイル | ホットリロード方式 | 説明 |
 | --- | --- | --- | --- |
 | `FileSource` | `file.go` | mtime ポーリング | ローカルファイルシステム |
+| `FileSystemSource` | `fs.go` | 非対応（不変ソース） | `io/fs.FS` ベース（embed / zip / os.DirFS） |
 | `MemSource` | `memory.go` | 組み込みチャネル通知 | メモリストレージ、テスト・注入用 |
 | `MultiSource` | `multiple.go` | 子 Source のイベント転送 | マルチソース集約（Fallback / FirstOK） |
 
@@ -68,6 +69,7 @@ package main
 import (
     "context"
     "fmt"
+    "os"
     "github.com/tx7do/go-scripts/source"
 )
 
@@ -77,6 +79,12 @@ func main() {
     fileSrc := source.NewFileSource()
     defer fileSrc.Close()
     code, _ := fileSrc.Load(ctx, "/path/to/script.lua")
+
+    // FileSystemSource 使用（io/fs.FS ベース）
+    // go:embed、archive/zip、os.DirFS などに対応
+    fsSrc, _ := source.NewFileSystemSource(os.DirFS("/scripts"))
+    defer fsSrc.Close()
+    code, _ = fsSrc.Load(ctx, "hello.lua")
 
     memSrc := source.NewMemSource()
     defer memSrc.Close()
