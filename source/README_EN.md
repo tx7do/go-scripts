@@ -39,6 +39,7 @@ The Source module defines the core interfaces for script sources, providing unif
 | [redis](redis/README_EN.md) | go-redis/v9 | Value comparison polling |
 | [http](http/README_EN.md) | net/http | CRC32 checksum comparison |
 | [git](git/README_EN.md) | go-git/v6 | commit hash comparison polling |
+| [database](database/README_EN.md) | database/sql | checksum column comparison polling |
 
 ---
 
@@ -132,6 +133,7 @@ cd source && go test -v ./...
 - [Redis Source](redis/README_EN.md)
 - [HTTP Source](http/README_EN.md)
 - [Git Source](git/README_EN.md)
+- [Database Source](database/README_EN.md)
 
 ## License
 

@@ -39,6 +39,7 @@ Source モジュールはスクリプトソースのコアインターフェー�
 | [redis](redis/README_JP.md) | go-redis/v9 | 値比較ポーリング |
 | [http](http/README_JP.md) | net/http | CRC32 チェックサム比較 |
 | [git](git/README_JP.md) | go-git/v6 | commit hash 比較ポーリング |
+| [database](database/README_JP.md) | database/sql | checksum 列比較ポーリング |
 
 ---
 
@@ -126,6 +127,7 @@ cd source && go test -v ./...
 - [Redis Source](redis/README_JP.md)
 - [HTTP Source](http/README_JP.md)
 - [Git Source](git/README_JP.md)
+- [Database Source](database/README_JP.md)
 
 ## ライセンス
 
