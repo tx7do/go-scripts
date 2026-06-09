@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tx7do/go-scripts/source"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -230,7 +232,7 @@ func TestEnginePool_SetSource_GetSource(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = pool.Close() }()
 
-	want := NewMemSource()
+	want := source.NewMemSource()
 	pool.SetSource(want)
 	got := pool.GetSource()
 	assert.Same(t, want, got)
@@ -244,7 +246,7 @@ func TestEnginePool_Load(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = pool.Close() }()
 
-	src := NewMemSource()
+	src := source.NewMemSource()
 	src.Set("k", "code")
 	pool.SetSource(src)
 
@@ -259,7 +261,7 @@ func TestEnginePool_LoadMulti(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = pool.Close() }()
 
-	src := NewMemSource()
+	src := source.NewMemSource()
 	src.Set("a", "1")
 	src.Set("b", "2")
 	pool.SetSource(src)
@@ -275,7 +277,7 @@ func TestEnginePool_ExecuteFromKey(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = pool.Close() }()
 
-	src := NewMemSource()
+	src := source.NewMemSource()
 	src.Set("k", "code")
 	pool.SetSource(src)
 
@@ -292,7 +294,7 @@ func TestEnginePool_ExecuteFromKeys(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = pool.Close() }()
 
-	src := NewMemSource()
+	src := source.NewMemSource()
 	src.Set("a", "1")
 	src.Set("b", "2")
 	pool.SetSource(src)

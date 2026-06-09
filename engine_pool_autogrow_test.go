@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tx7do/go-scripts/source"
 )
 
 const autogrowTestType Type = "mock-autogrow"
@@ -204,7 +206,7 @@ func TestAutoGrowEnginePool_SetSource_Load(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = pool.Close() }()
 
-	src := NewMemSource()
+	src := source.NewMemSource()
 	src.Set("k", "code")
 	pool.SetSource(src)
 
@@ -219,7 +221,7 @@ func TestAutoGrowEnginePool_ExecuteFromKey(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = pool.Close() }()
 
-	src := NewMemSource()
+	src := source.NewMemSource()
 	src.Set("k", "code")
 	pool.SetSource(src)
 

@@ -49,6 +49,12 @@ func (r *recordingLogger) Error(_ context.Context, msg string, args ...any) {
 	r.records = append(r.records, logRecord{"ERROR", msg, args})
 }
 
+func (r *recordingLogger) With(...any) Logger {
+	// recordingLogger ignores attached key-value pairs and returns self.
+	// This is sufficient for testing purposes since we only verify log calls.
+	return r
+}
+
 func (r *recordingLogger) snapshot() []logRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -210,4 +216,71 @@ func TestSetLogger_Concurrent(t *testing.T) {
 	SetLogger(nil)
 	_, ok := GetLogger().(nopLogger)
 	assert.True(t, ok)
+}
+
+// TestSlogLogger_With verifies that With returns a new logger with the given
+// key-value pairs attached, and those attributes appear in every log record.
+func TestSlogLogger_With(t *testing.T) {
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	base := SlogLogger{L: slog.New(h)}
+
+	// Create a module-specific logger using With.
+	moduleLogger := base.With("module", "lua", "version", "5.1")
+
+	ctx := context.Background()
+	moduleLogger.Info(ctx, "engine initialized")
+	moduleLogger.Error(ctx, "execution failed", "error", "timeout")
+
+	output := buf.String()
+	// Both log records should contain the attached attributes.
+	assert.Contains(t, output, "module=lua")
+	assert.Contains(t, output, "version=5.1")
+	assert.Contains(t, output, "msg=\"engine initialized\"")
+	assert.Contains(t, output, "msg=\"execution failed\"")
+	assert.Contains(t, output, "error=timeout")
+
+	// The original logger should NOT have the attached attributes.
+	buf.Reset()
+	base.Info(ctx, "original logger")
+	output2 := buf.String()
+	assert.Contains(t, output2, "msg=\"original logger\"")
+	assert.NotContains(t, output2, "module=lua")
+}
+
+// TestSlogLogger_With_Chaining verifies that multiple With calls can be
+// chained to accumulate attributes.
+func TestSlogLogger_With_Chaining(t *testing.T) {
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	base := SlogLogger{L: slog.New(h)}
+
+	// Chain multiple With calls.
+	logger := base.With("module", "javascript").With("engine", "goja", "version", "v1.60.0")
+
+	logger.Info(context.Background(), "chained attributes test")
+
+	output := buf.String()
+	assert.Contains(t, output, "module=javascript")
+	assert.Contains(t, output, "engine=goja")
+	assert.Contains(t, output, "version=v1.60.0")
+}
+
+// TestNopLogger_With verifies that nopLogger.With returns another nopLogger
+// and does not panic.
+func TestNopLogger_With(t *testing.T) {
+	base := nopLogger{}
+	withLogger := base.With("module", "test")
+
+	// Should return another nopLogger.
+	_, ok := withLogger.(nopLogger)
+	assert.True(t, ok, "nopLogger.With must return nopLogger")
+
+	// Calling methods on the returned logger should not panic.
+	assert.NotPanics(t, func() {
+		withLogger.Debug(nil, "debug")
+		withLogger.Info(nil, "info")
+		withLogger.Warn(nil, "warn")
+		withLogger.Error(nil, "error")
+	})
 }

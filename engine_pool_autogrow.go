@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/tx7do/go-scripts/source"
 )
 
 // AutoGrowEnginePool is an Engine pool that can grow on demand up to a configured
@@ -207,7 +209,7 @@ func (p *AutoGrowEnginePool) Close() error {
 // SetSource binds a ScriptSource on an acquired Engine.
 // Note: the binding is LOCAL to that Engine instance; other engines in the pool
 // are unaffected. See the package-level note above for pool-wide setup.
-func (p *AutoGrowEnginePool) SetSource(source Source) {
+func (p *AutoGrowEnginePool) SetSource(source source.Reader) {
 	eng, err := p.Acquire()
 	if err != nil {
 		return
@@ -217,7 +219,7 @@ func (p *AutoGrowEnginePool) SetSource(source Source) {
 }
 
 // GetSource returns the ScriptSource bound to an acquired Engine (or nil).
-func (p *AutoGrowEnginePool) GetSource() Source {
+func (p *AutoGrowEnginePool) GetSource() source.Reader {
 	eng, err := p.Acquire()
 	if err != nil {
 		return nil

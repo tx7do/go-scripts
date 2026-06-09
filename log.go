@@ -27,6 +27,10 @@ type Logger interface {
 	Warn(ctx context.Context, msg string, args ...any)
 	// Error logs a message at ERROR level.
 	Error(ctx context.Context, msg string, args ...any)
+
+	// With returns a new Logger instance with the given key-value pairs attached.
+	// This is typically used to distinguish modules, e.g., logger.With("module", "goja").
+	With(args ...any) Logger
 }
 
 // nopLogger discards every log record. It is the zero-cost default used until
@@ -37,6 +41,11 @@ func (nopLogger) Debug(context.Context, string, ...any) {}
 func (nopLogger) Info(context.Context, string, ...any)  {}
 func (nopLogger) Warn(context.Context, string, ...any)  {}
 func (nopLogger) Error(context.Context, string, ...any) {}
+
+// With returns a new nopLogger. Since nopLogger discards all output, the
+// attached key-value pairs have no effect but the method exists to satisfy
+// the Logger interface.
+func (nopLogger) With(...any) Logger { return nopLogger{} }
 
 // Compile-time assertion: nopLogger implements Logger.
 var _ Logger = nopLogger{}
@@ -83,6 +92,14 @@ func (s SlogLogger) Error(ctx context.Context, msg string, args ...any) {
 		ctx = context.Background()
 	}
 	s.L.ErrorContext(ctx, msg, args...)
+}
+
+// With returns a new SlogLogger whose underlying *slog.Logger has the given
+// key-value pairs attached. This is typically used to distinguish modules,
+// e.g., logger.With("module", "goja"). The returned logger will include these
+// attributes in every log record it produces.
+func (s SlogLogger) With(args ...any) Logger {
+	return SlogLogger{L: s.L.With(args...)}
 }
 
 // Compile-time assertion: SlogLogger implements Logger.

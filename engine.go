@@ -2,6 +2,8 @@ package script_engine
 
 import (
 	"context"
+
+	"github.com/tx7do/go-scripts/source"
 )
 
 // Engine defines the interface for script engines.
@@ -34,10 +36,10 @@ type Engine interface {
 	// SetSource binds a ScriptSource (FileSource / S3 / Mem / Multi / ...) to the
 	// engine. Subsequent Load / ExecuteFromKey / ExecuteFromKeys calls read through it.
 	// Passing nil clears any previously bound source.
-	SetSource(source Source)
+	SetSource(source source.Reader)
 
 	// GetSource returns the currently bound ScriptSource, or nil if none has been set.
-	GetSource() Source
+	GetSource() source.Reader
 
 	//////////////////////////////////////////////////////////////////////////////////////////
 	// Script Loading
@@ -111,6 +113,20 @@ type Engine interface {
 	// under `name` so scripts can require/use it. The accepted shape of `module`
 	// depends on the engine implementation.
 	RegisterModule(name string, module any) error
+
+	//////////////////////////////////////////////////////////////////////////////////////////
+	// Hot Reload (Watch)
+	//////////////////////////////////////////////////////////////////////////////////////////
+
+	// StartWatch starts watching the script identified by `key` for changes via the
+	// bound Source's Watch capability. When a change is detected, the script is
+	// automatically reloaded. Returns an error if the source doesn't implement
+	// Watcher or is not bound.
+	StartWatch(ctx context.Context, key string) error
+
+	// StopWatch stops watching the script identified by `key` and cleans up
+	// the associated goroutine.
+	StopWatch(key string) error
 
 	//////////////////////////////////////////////////////////////////////////////////////////
 	// Error Handling
