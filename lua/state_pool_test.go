@@ -2,23 +2,32 @@ package lua
 
 import (
 	"fmt"
+	"sync"
+	"testing"
+
 	"github.com/yuin/gluamapper"
 	lua "github.com/yuin/gopher-lua"
-	"testing"
 )
 
-func testWorker() {
+// testWorker runs a short Lua script using a LState borrowed from the pool.
+// The pool is created with SkipOpenLibs=true, so each borrower must OpenLibs
+// itself before it can use the standard library (print, etc.).
+func testWorker(wg *sync.WaitGroup) {
+	defer wg.Done()
 	L := luaPool.Borrow()
 	defer luaPool.Return(L)
+	L.OpenLibs()
 	if err := L.DoString(`print("hello")`); err != nil {
 		panic(err)
 	}
 }
 
 func TestStatePool(t *testing.T) {
-	defer luaPool.Shutdown()
-	go testWorker()
-	go testWorker()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go testWorker(&wg)
+	go testWorker(&wg)
+	wg.Wait()
 }
 
 func TestLuaTableMap(t *testing.T) {

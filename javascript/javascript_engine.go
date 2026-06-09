@@ -3,8 +3,6 @@ package js
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"sync"
 
 	"github.com/dop251/goja"
@@ -30,10 +28,11 @@ type engine struct {
 	runtime  *goja.Runtime   // the JavaScript runtime
 	programs []*goja.Program // compiled programs queued for execution
 
+	source      scriptEngine.Source // optional script source (File / S3 / Mem / ...)
 	initialized bool
 	lastError   error
 
-	mu          sync.RWMutex // protects initialized and programs
+	mu          sync.RWMutex // protects initialized, programs and source
 	execMu      sync.Mutex   // protects runtime
 	lastErrorMu sync.RWMutex // protects lastError
 }
@@ -112,14 +111,75 @@ func (e *engine) IsInitialized() bool {
 	return e.initialized
 }
 
-// LoadString compiles and queues a script given as a string source.
-func (e *engine) LoadString(_ context.Context, source string) error {
+////////////////////////////////////////////////////////////////////////////////
+// ScriptSource injection & access
+////////////////////////////////////////////////////////////////////////////////
+
+// SetSource binds a ScriptSource (FileSource / S3 / Mem / Multi / ...) to the
+// engine. Subsequent Load / LoadMulti / ExecuteFromKey / ExecuteFromKeys calls
+// read through it. Passing nil clears any previously bound source.
+func (e *engine) SetSource(source scriptEngine.Source) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.source = source
+}
+
+// GetSource returns the currently bound ScriptSource, or nil if none has been set.
+func (e *engine) GetSource() scriptEngine.Source {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.source
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Script loading
+////////////////////////////////////////////////////////////////////////////////
+
+// Load loads a single script from the bound Source using the given key
+// (path / object key / script id, ...). The loaded program is appended to the
+// queue consumed later by Execute.
+func (e *engine) Load(ctx context.Context, key string) error {
+	if !e.IsInitialized() {
+		e.setLastError(ErrJavascriptEngineNotInitialized)
+		return ErrJavascriptEngineNotInitialized
+	}
+	e.mu.RLock()
+	src := e.source
+	e.mu.RUnlock()
+	if src == nil {
+		err := fmt.Errorf("javascript engine: no source bound")
+		e.setLastError(err)
+		return err
+	}
+	code, err := src.Load(ctx, key)
+	if err != nil {
+		e.setLastError(err)
+		return err
+	}
+	return e.LoadString(ctx, key, code)
+}
+
+// LoadMulti loads multiple scripts from the bound Source in order. It aborts on
+// the first error.
+func (e *engine) LoadMulti(ctx context.Context, keys []string) error {
+	for _, k := range keys {
+		if err := e.Load(ctx, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LoadString compiles and queues an inline script. `name` is used for
+// diagnostics (stack traces, error messages); it is not used to look up the
+// script on disk. LoadString does NOT go through the bound Source.
+func (e *engine) LoadString(_ context.Context, name string, code string) error {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return ErrJavascriptEngineNotInitialized
 	}
 
-	program, err := goja.Compile("", source, true)
+	program, err := goja.Compile(name, code, true)
 	if err != nil {
 		e.setLastError(err)
 		return err
@@ -137,86 +197,13 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	return nil
 }
 
-// LoadFile reads, compiles and queues a script from the given file path.
-func (e *engine) LoadFile(_ context.Context, filePath string) error {
-	if !e.IsInitialized() {
-		e.setLastError(ErrJavascriptEngineNotInitialized)
-		return ErrJavascriptEngineNotInitialized
-	}
+////////////////////////////////////////////////////////////////////////////////
+// Script execution
+////////////////////////////////////////////////////////////////////////////////
 
-	source, err := os.ReadFile(filePath)
-	if err != nil {
-		e.setLastError(err)
-		return err
-	}
-
-	program, err := goja.Compile(filePath, string(source), true)
-	if err != nil {
-		e.setLastError(err)
-		return err
-	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.initialized {
-		e.setLastError(ErrJavascriptEngineNotInitialized)
-		return ErrJavascriptEngineNotInitialized
-	}
-	e.programs = append(e.programs, program)
-
-	e.ClearError()
-	return nil
-}
-
-// LoadReader reads, compiles and queues a script from the given io.Reader.
-func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) error {
-	if !e.IsInitialized() {
-		e.setLastError(ErrJavascriptEngineNotInitialized)
-		return ErrJavascriptEngineNotInitialized
-	}
-
-	source, err := io.ReadAll(reader)
-	if err != nil {
-		e.setLastError(err)
-		return err
-	}
-
-	return e.LoadString(ctx, string(source))
-}
-
-// LoadStrings compiles and queues multiple scripts from string sources.
-func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
-	for _, source := range sources {
-		if err := e.LoadString(ctx, source); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// LoadFiles compiles and queues multiple scripts from file paths.
-func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
-	for _, filePath := range filePaths {
-		if err := e.LoadFile(ctx, filePath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// executeProgram runs a single compiled program.
-func (e *engine) executeProgram(ctx context.Context, program *goja.Program) (any, error) {
-	if !e.IsInitialized() {
-		e.setLastError(ErrJavascriptEngineNotInitialized)
-		return nil, ErrJavascriptEngineNotInitialized
-	}
-
-	return e.RunProgram(ctx, program)
-}
-
-// ExecuteLoaded runs every program queued by LoadString/LoadFile/LoadReader
+// Execute runs every program previously loaded via Load/LoadMulti/LoadString
 // and returns the collected results in order.
-func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
+func (e *engine) Execute(ctx context.Context) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
@@ -248,11 +235,56 @@ func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	return results, nil
 }
 
-// ExecuteString compiles and immediately runs the given string source.
-func (e *engine) ExecuteString(ctx context.Context, src string) (any, error) {
+// ExecuteFromKey loads the script identified by `key` from the bound Source
+// and immediately runs it, all in one step. The bound Source must be non-nil.
+func (e *engine) ExecuteFromKey(ctx context.Context, key string) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrJavascriptEngineNotInitialized)
 		return nil, ErrJavascriptEngineNotInitialized
+	}
+	e.mu.RLock()
+	src := e.source
+	e.mu.RUnlock()
+	if src == nil {
+		err := fmt.Errorf("javascript engine: no source bound")
+		e.setLastError(err)
+		return nil, err
+	}
+	code, err := src.Load(ctx, key)
+	if err != nil {
+		e.setLastError(err)
+		return nil, err
+	}
+	return e.ExecuteString(ctx, key, code)
+}
+
+// ExecuteFromKeys is the multi-key variant of ExecuteFromKey; results are
+// returned in the same order as `keys`.
+func (e *engine) ExecuteFromKeys(ctx context.Context, keys []string) ([]any, error) {
+	results := make([]any, 0, len(keys))
+	for _, k := range keys {
+		res, err := e.ExecuteFromKey(ctx, k)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
+// ExecuteString compiles and immediately runs the inline script (name+code),
+// bypassing the bound Source. `name` is used for diagnostics (stack traces).
+func (e *engine) ExecuteString(ctx context.Context, name string, code string) (any, error) {
+	if !e.IsInitialized() {
+		e.setLastError(ErrJavascriptEngineNotInitialized)
+		return nil, ErrJavascriptEngineNotInitialized
+	}
+
+	// Compile with the given name so stack traces point to a meaningful label.
+	program, err := goja.Compile(name, code, true)
+	if err != nil {
+		e.setLastError(err)
+		return nil, err
 	}
 
 	done := make(chan struct{})
@@ -279,12 +311,11 @@ func (e *engine) ExecuteString(ctx context.Context, src string) (any, error) {
 			}
 		}()
 
-		val, runErr := rt.RunString(src)
+		val, runErr := rt.RunProgram(program)
 		if runErr != nil || val == nil {
 			return nil, runErr
 		}
-		exported := val.Export()
-		return exported, retErr
+		return val.Export(), retErr
 	})
 
 	if err != nil {
@@ -295,27 +326,9 @@ func (e *engine) ExecuteString(ctx context.Context, src string) (any, error) {
 	return result, nil
 }
 
-// ExecuteFile compiles and immediately runs the script at the given file path.
-func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) {
-	if err := e.LoadFile(ctx, filePath); err != nil {
-		return nil, err
-	}
-
-	// ExecuteLoaded returns a slice of results (as any); keep only the last one
-	// to match the single-file semantics.
-	resAny, err := e.ExecuteLoaded(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if arr, ok := resAny.([]any); ok {
-		if len(arr) == 0 {
-			return nil, nil
-		}
-		return arr[len(arr)-1], nil
-	}
-	return resAny, nil
-}
+////////////////////////////////////////////////////////////////////////////////
+// Globals, functions, modules
+////////////////////////////////////////////////////////////////////////////////
 
 // RegisterGlobal registers a global variable in the JavaScript runtime.
 func (e *engine) RegisterGlobal(name string, value any) error {
@@ -335,34 +348,6 @@ func (e *engine) RegisterGlobal(name string, value any) error {
 	e.ClearError()
 
 	return nil
-}
-
-// ExecuteStrings compiles and immediately runs multiple string sources,
-// returning each result in order.
-func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
-	results := make([]any, 0, len(sources))
-	for _, src := range sources {
-		res, err := e.ExecuteString(ctx, src)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, res)
-	}
-	return results, nil
-}
-
-// ExecuteFiles compiles and immediately runs multiple file paths,
-// returning each result in order.
-func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
-	results := make([]any, 0, len(filePaths))
-	for _, filePath := range filePaths {
-		res, err := e.ExecuteFile(ctx, filePath)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, res)
-	}
-	return results, nil
 }
 
 // GetGlobal reads a global variable from the JavaScript runtime.
@@ -507,6 +492,10 @@ func (e *engine) RegisterModule(name string, module any) error {
 
 	return nil
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// Error handling
+////////////////////////////////////////////////////////////////////////////////
 
 // GetLastError returns the last error recorded by the engine.
 func (e *engine) GetLastError() error {

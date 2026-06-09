@@ -3,7 +3,6 @@ package lua
 import (
 	"context"
 	"fmt"
-	"io"
 	"sync"
 
 	Lua "github.com/yuin/gopher-lua"
@@ -23,8 +22,9 @@ type engine struct {
 	initialized bool
 	lastError   error
 
-	mu          sync.RWMutex
-	lastErrorMu sync.Mutex
+	source      scriptEngine.Source // optional script source (File / S3 / Mem / ...)
+	mu          sync.RWMutex        // protects vm, initialized and source
+	lastErrorMu sync.Mutex          // protects lastError
 }
 
 // newLuaEngine creates a Lua engine instance.
@@ -80,8 +80,73 @@ func (e *engine) IsInitialized() bool {
 	return e.initialized
 }
 
-// LoadString compiles and queues a script given as a string source.
-func (e *engine) LoadString(_ context.Context, source string) error {
+////////////////////////////////////////////////////////////////////////////////
+// ScriptSource injection & access
+////////////////////////////////////////////////////////////////////////////////
+
+// SetSource binds a ScriptSource (FileSource / S3 / Mem / Multi / ...) to the
+// engine. Subsequent Load / LoadMulti / ExecuteFromKey / ExecuteFromKeys calls
+// read through it. Passing nil clears any previously bound source.
+func (e *engine) SetSource(source scriptEngine.Source) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.source = source
+}
+
+// GetSource returns the currently bound ScriptSource, or nil if none has been set.
+func (e *engine) GetSource() scriptEngine.Source {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.source
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Script loading
+////////////////////////////////////////////////////////////////////////////////
+
+// Load loads a single script from the bound Source using the given key
+// (path / object key / script id, ...). The loaded script replaces the
+// previously-compiled function and is run by the next Execute.
+func (e *engine) Load(ctx context.Context, key string) error {
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return ErrLuaEngineNotInitialized
+	}
+	e.mu.RLock()
+	src := e.source
+	e.mu.RUnlock()
+	if src == nil {
+		err := fmt.Errorf("lua engine: no source bound")
+		e.setLastError(err)
+		return err
+	}
+	code, err := src.Load(ctx, key)
+	if err != nil {
+		e.setLastError(err)
+		return err
+	}
+	return e.LoadString(ctx, key, code)
+}
+
+// LoadMulti loads multiple scripts from the bound Source in order.
+// It aborts on the first error.
+//
+// Note: gopher-lua only keeps one compiled function at a time, so each Load
+// overwrites the previous; use ExecuteFromKeys to run multiple scripts in order,
+// or issue Load+Execute pairs manually.
+func (e *engine) LoadMulti(ctx context.Context, keys []string) error {
+	for _, k := range keys {
+		if err := e.Load(ctx, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LoadString compiles and queues an inline script. `name` is accepted for
+// interface compatibility but gopher-lua's LoadString does not use a name, so
+// it is ignored. LoadString does NOT go through the bound Source.
+func (e *engine) LoadString(_ context.Context, _ string, source string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -100,60 +165,16 @@ func (e *engine) LoadString(_ context.Context, source string) error {
 	return nil
 }
 
-// LoadStrings compiles and queues multiple scripts from string sources.
-func (e *engine) LoadStrings(ctx context.Context, sources []string) error {
-	for _, source := range sources {
-		if err := e.LoadString(ctx, source); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+////////////////////////////////////////////////////////////////////////////////
+// Script execution
+////////////////////////////////////////////////////////////////////////////////
 
-// LoadFiles compiles and queues multiple scripts from file paths.
-func (e *engine) LoadFiles(ctx context.Context, filePaths []string) error {
-	for _, filePath := range filePaths {
-		if err := e.LoadFile(ctx, filePath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// LoadFile reads, compiles and queues a script from the given file path.
-func (e *engine) LoadFile(_ context.Context, filePath string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if !e.initialized {
-		e.setLastError(ErrLuaEngineNotInitialized)
-		return ErrLuaEngineNotInitialized
-	}
-
-	if err := e.vm.LoadFile(filePath); err != nil {
-		e.setLastError(err)
-		return err
-	}
-
-	e.ClearError()
-
-	return nil
-}
-
-// LoadReader reads, compiles and queues a script from the given io.Reader.
-func (e *engine) LoadReader(ctx context.Context, reader io.Reader, _ string) error {
-	source, err := io.ReadAll(reader)
-	if err != nil {
-		e.setLastError(err)
-		return err
-	}
-
-	return e.LoadString(ctx, string(source))
-}
-
-// ExecuteLoaded runs every script queued by LoadString/LoadFile/LoadReader.
+// Execute runs the script previously loaded via Load/LoadMulti/LoadString.
 // Context cancellation aborts the run.
-func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
+//
+// Note: gopher-lua only keeps a single compiled function at a time, so the
+// returned result reflects the last load.
+func (e *engine) Execute(ctx context.Context) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
@@ -189,36 +210,47 @@ func (e *engine) ExecuteLoaded(ctx context.Context) (any, error) {
 	}
 }
 
-// ExecuteStrings compiles and immediately runs multiple string sources,
-// returning each result in order.
-func (e *engine) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
-	var results []any
-	for _, source := range sources {
-		result, err := e.ExecuteString(ctx, source)
+// ExecuteFromKey loads the script identified by `key` from the bound Source
+// and immediately runs it, all in one step. The bound Source must be non-nil.
+func (e *engine) ExecuteFromKey(ctx context.Context, key string) (any, error) {
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return nil, ErrLuaEngineNotInitialized
+	}
+	e.mu.RLock()
+	src := e.source
+	e.mu.RUnlock()
+	if src == nil {
+		err := fmt.Errorf("lua engine: no source bound")
+		e.setLastError(err)
+		return nil, err
+	}
+	code, err := src.Load(ctx, key)
+	if err != nil {
+		e.setLastError(err)
+		return nil, err
+	}
+	return e.ExecuteString(ctx, key, code)
+}
+
+// ExecuteFromKeys is the multi-key variant of ExecuteFromKey; results are
+// returned in the same order as `keys`.
+func (e *engine) ExecuteFromKeys(ctx context.Context, keys []string) ([]any, error) {
+	results := make([]any, 0, len(keys))
+	for _, k := range keys {
+		res, err := e.ExecuteFromKey(ctx, k)
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, result)
+		results = append(results, res)
 	}
 	return results, nil
 }
 
-// ExecuteFiles compiles and immediately runs multiple file paths,
-// returning each result in order.
-func (e *engine) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
-	var results []any
-	for _, filePath := range filePaths {
-		result, err := e.ExecuteFile(ctx, filePath)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, result)
-	}
-	return results, nil
-}
-
-// ExecuteString compiles and immediately runs the given string source.
-func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) {
+// ExecuteString compiles and immediately runs the inline script (name+code),
+// bypassing the bound Source. `name` is accepted for interface compatibility but
+// gopher-lua's DoString does not use a name, so it is ignored.
+func (e *engine) ExecuteString(ctx context.Context, _ string, source string) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
 		return nil, ErrLuaEngineNotInitialized
@@ -253,41 +285,9 @@ func (e *engine) ExecuteString(ctx context.Context, source string) (any, error) 
 	}
 }
 
-// ExecuteFile compiles and immediately runs the script at the given file path.
-func (e *engine) ExecuteFile(ctx context.Context, filePath string) (any, error) {
-	if !e.IsInitialized() {
-		e.setLastError(ErrLuaEngineNotInitialized)
-		return nil, ErrLuaEngineNotInitialized
-	}
-
-	done := make(chan error, 1)
-
-	go func() {
-		e.mu.Lock()
-		defer e.mu.Unlock()
-
-		if !e.initialized {
-			done <- ErrLuaEngineNotInitialized
-			return
-		}
-
-		done <- e.vm.ExecuteFile(filePath)
-	}()
-
-	select {
-	case <-ctx.Done():
-		e.setLastError(ctx.Err())
-		return nil, ctx.Err()
-
-	case err := <-done:
-		if err != nil {
-			e.setLastError(err)
-			return nil, err
-		}
-		e.ClearError()
-		return nil, nil
-	}
-}
+////////////////////////////////////////////////////////////////////////////////
+// Globals, functions, modules
+////////////////////////////////////////////////////////////////////////////////
 
 // RegisterGlobal binds a Go value into the Lua global scope under name.
 func (e *engine) RegisterGlobal(name string, value any) error {
@@ -428,6 +428,10 @@ func (e *engine) RegisterModule(name string, module any) error {
 	e.setLastError(err)
 	return err
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// Error handling
+////////////////////////////////////////////////////////////////////////////////
 
 // GetLastError returns the last error recorded by the engine.
 func (e *engine) GetLastError() error {

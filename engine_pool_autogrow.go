@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 )
 
@@ -190,110 +189,132 @@ func (p *AutoGrowEnginePool) Close() error {
 	return lastErr
 }
 
-// LoadString loads a script from a string into an acquired Engine.
-func (p *AutoGrowEnginePool) LoadString(ctx context.Context, source string) error {
+// The following methods are common wrappers that follow the pattern
+//     Acquire -> invoke -> Release.
+// They exist so callers can avoid the Acquire/Release boilerplate for trivial
+// one-shot calls. They mirror the current Engine interface 1:1.
+//
+// IMPORTANT: per-call wrappers acquire a single Engine, perform the operation,
+// and release it back. Stateful bindings (SetSource, RegisterGlobal,
+// RegisterFunction, RegisterModule) are therefore LOCAL TO THAT ENGINE INSTANCE.
+// If you need a binding to apply to every Engine in the pool, iterate over
+// Acquire/Release yourself or pre-configure each Engine before pooling.
+
+////////////////////////////////////////////////////////////////////////////////
+// ScriptSource injection & access
+////////////////////////////////////////////////////////////////////////////////
+
+// SetSource binds a ScriptSource on an acquired Engine.
+// Note: the binding is LOCAL to that Engine instance; other engines in the pool
+// are unaffected. See the package-level note above for pool-wide setup.
+func (p *AutoGrowEnginePool) SetSource(source Source) {
+	eng, err := p.Acquire()
+	if err != nil {
+		return
+	}
+	defer p.Release(eng)
+	eng.SetSource(source)
+}
+
+// GetSource returns the ScriptSource bound to an acquired Engine (or nil).
+func (p *AutoGrowEnginePool) GetSource() Source {
+	eng, err := p.Acquire()
+	if err != nil {
+		return nil
+	}
+	defer p.Release(eng)
+	return eng.GetSource()
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Script loading
+////////////////////////////////////////////////////////////////////////////////
+
+// Load loads a single script from the bound Source into an acquired Engine.
+func (p *AutoGrowEnginePool) Load(ctx context.Context, key string) error {
 	eng, err := p.Acquire()
 	if err != nil {
 		return err
 	}
 	defer p.Release(eng)
-	return eng.LoadString(ctx, source)
+	return eng.Load(ctx, key)
 }
 
-// LoadFile loads a script from a file path into an acquired Engine.
-func (p *AutoGrowEnginePool) LoadFile(ctx context.Context, filePath string) error {
+// LoadMulti loads multiple scripts from the bound Source into an acquired Engine.
+func (p *AutoGrowEnginePool) LoadMulti(ctx context.Context, keys []string) error {
 	eng, err := p.Acquire()
 	if err != nil {
 		return err
 	}
 	defer p.Release(eng)
-	return eng.LoadFile(ctx, filePath)
+	return eng.LoadMulti(ctx, keys)
 }
 
-// LoadReader loads a script from an io.Reader into an acquired Engine.
-func (p *AutoGrowEnginePool) LoadReader(ctx context.Context, reader io.Reader, name string) error {
+// LoadString compiles an inline script (name+code) on an acquired Engine.
+// It does NOT go through the bound Source.
+func (p *AutoGrowEnginePool) LoadString(ctx context.Context, name string, code string) error {
 	eng, err := p.Acquire()
 	if err != nil {
 		return err
 	}
 	defer p.Release(eng)
-	return eng.LoadReader(ctx, reader, name)
+	return eng.LoadString(ctx, name, code)
 }
 
-// LoadStrings loads multiple scripts from string sources into an acquired Engine.
-func (p *AutoGrowEnginePool) LoadStrings(ctx context.Context, sources []string) error {
-	eng, err := p.Acquire()
-	if err != nil {
-		return err
-	}
-	defer p.Release(eng)
-	return eng.LoadStrings(ctx, sources)
-}
+////////////////////////////////////////////////////////////////////////////////
+// Script execution
+////////////////////////////////////////////////////////////////////////////////
 
-// LoadFiles loads multiple scripts from file paths into an acquired Engine.
-func (p *AutoGrowEnginePool) LoadFiles(ctx context.Context, filePaths []string) error {
-	eng, err := p.Acquire()
-	if err != nil {
-		return err
-	}
-	defer p.Release(eng)
-	return eng.LoadFiles(ctx, filePaths)
-}
-
-// ExecuteLoaded runs the previously loaded script(s) on an acquired Engine.
-func (p *AutoGrowEnginePool) ExecuteLoaded(ctx context.Context) (any, error) {
+// Execute runs every previously-loaded script on an acquired Engine and returns
+// the combined result.
+func (p *AutoGrowEnginePool) Execute(ctx context.Context) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
 		return nil, err
 	}
 	defer p.Release(eng)
-	return eng.ExecuteLoaded(ctx)
+	return eng.Execute(ctx)
 }
 
-// ExecuteString runs the given script source on an acquired Engine.
-func (p *AutoGrowEnginePool) ExecuteString(ctx context.Context, source string) (any, error) {
+// ExecuteFromKey loads (via the bound Source) and immediately runs the script
+// identified by key on an acquired Engine.
+func (p *AutoGrowEnginePool) ExecuteFromKey(ctx context.Context, key string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
 		return nil, err
 	}
 	defer p.Release(eng)
-	return eng.ExecuteString(ctx, source)
+	return eng.ExecuteFromKey(ctx, key)
 }
 
-// ExecuteFile runs the script at the given file path on an acquired Engine.
-func (p *AutoGrowEnginePool) ExecuteFile(ctx context.Context, filePath string) (any, error) {
+// ExecuteFromKeys is the multi-key variant of ExecuteFromKey; results are
+// returned in the same order as keys.
+func (p *AutoGrowEnginePool) ExecuteFromKeys(ctx context.Context, keys []string) ([]any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
 		return nil, err
 	}
 	defer p.Release(eng)
-	return eng.ExecuteFile(ctx, filePath)
+	return eng.ExecuteFromKeys(ctx, keys)
 }
 
-// ExecuteStrings runs multiple script sources on an acquired Engine and returns
-// each result in order.
-func (p *AutoGrowEnginePool) ExecuteStrings(ctx context.Context, sources []string) ([]any, error) {
+// ExecuteString compiles and immediately runs the inline script (name+code) on
+// an acquired Engine, bypassing the bound Source.
+func (p *AutoGrowEnginePool) ExecuteString(ctx context.Context, name string, code string) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
 		return nil, err
 	}
 	defer p.Release(eng)
-	return eng.ExecuteStrings(ctx, sources)
+	return eng.ExecuteString(ctx, name, code)
 }
 
-// ExecuteFiles runs multiple script files on an acquired Engine and returns each
-// result in order.
-func (p *AutoGrowEnginePool) ExecuteFiles(ctx context.Context, filePaths []string) ([]any, error) {
-	eng, err := p.Acquire()
-	if err != nil {
-		return nil, err
-	}
-	defer p.Release(eng)
-	return eng.ExecuteFiles(ctx, filePaths)
-}
+////////////////////////////////////////////////////////////////////////////////
+// Globals, functions, modules
+////////////////////////////////////////////////////////////////////////////////
 
 // RegisterGlobal registers a global variable on an acquired Engine.
-// Note: the registration is local to that Engine instance.
+// Note: the registration is LOCAL to that Engine instance.
 func (p *AutoGrowEnginePool) RegisterGlobal(name string, value any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -313,8 +334,8 @@ func (p *AutoGrowEnginePool) GetGlobal(name string) (any, error) {
 	return eng.GetGlobal(name)
 }
 
-// RegisterFunction registers a function on an acquired Engine.
-// Note: the registration is local to that Engine instance.
+// RegisterFunction registers a host function on an acquired Engine.
+// Note: the registration is LOCAL to that Engine instance.
 func (p *AutoGrowEnginePool) RegisterFunction(name string, fn any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -324,7 +345,7 @@ func (p *AutoGrowEnginePool) RegisterFunction(name string, fn any) error {
 	return eng.RegisterFunction(name, fn)
 }
 
-// CallFunction calls the named function on an acquired Engine with the given args.
+// CallFunction invokes the named script function on an acquired Engine.
 func (p *AutoGrowEnginePool) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -335,7 +356,7 @@ func (p *AutoGrowEnginePool) CallFunction(ctx context.Context, name string, args
 }
 
 // RegisterModule registers a module on an acquired Engine.
-// Note: the registration is local to that Engine instance.
+// Note: the registration is LOCAL to that Engine instance.
 func (p *AutoGrowEnginePool) RegisterModule(name string, module any) error {
 	eng, err := p.Acquire()
 	if err != nil {
@@ -344,6 +365,10 @@ func (p *AutoGrowEnginePool) RegisterModule(name string, module any) error {
 	defer p.Release(eng)
 	return eng.RegisterModule(name, module)
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// Error handling
+////////////////////////////////////////////////////////////////////////////////
 
 // GetLastError returns the last error from an acquired Engine.
 func (p *AutoGrowEnginePool) GetLastError() error {

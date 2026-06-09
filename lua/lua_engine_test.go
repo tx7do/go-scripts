@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	scriptEngine "github.com/tx7do/go-scripts"
 )
 
 func TestLuaEngine(t *testing.T) {
@@ -32,7 +36,7 @@ func TestLuaEngine(t *testing.T) {
 	})
 
 	// Execute a script.
-	result, err := eng.ExecuteString(ctx, `
+	result, err := eng.ExecuteString(ctx, "test.lua", `
     function add(a, b)
         return a + b
     end
@@ -62,7 +66,7 @@ func TestConcurrentCallAndGet(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Define the function `add` and run the snippet so it is loaded into the VM.
-	_, err = eng.ExecuteString(ctx, `
+	_, err = eng.ExecuteString(ctx, "test.lua", `
         function add(a, b)
             return a + b
         end
@@ -195,4 +199,194 @@ func TestConcurrentInitClose(t *testing.T) {
 	}
 
 	fmt.Println("concurrent init/close test completed")
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// ScriptSource / new Load* / ExecuteFromKey* APIs
+////////////////////////////////////////////////////////////////////////////////
+
+// newMemSourceWith returns a MemSource pre-populated with the given key=code
+// pairs.
+func newMemSourceWith(t *testing.T, scripts map[string]string) *scriptEngine.MemSource {
+	t.Helper()
+	src := scriptEngine.NewMemSource()
+	for k, v := range scripts {
+		src.Set(k, v)
+	}
+	return src
+}
+
+func TestLuaEngine_SetGetSource(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Initially nil.
+	assert.Nil(t, eng.GetSource())
+
+	want := newMemSourceWith(t, map[string]string{"k": "x"})
+	eng.SetSource(want)
+	assert.Same(t, want, eng.GetSource())
+
+	// Passing nil clears the binding.
+	eng.SetSource(nil)
+	assert.Nil(t, eng.GetSource())
+}
+
+func TestLuaEngine_Load_FromSource(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	eng.SetSource(newMemSourceWith(t, map[string]string{
+		"hello": "answer = 42",
+	}))
+
+	require.NoError(t, eng.Load(context.Background(), "hello"))
+
+	// Execute should expose `answer` to subsequent globals reads.
+	_, err = eng.Execute(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("answer")
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), v)
+}
+
+func TestLuaEngine_Load_NoSourceBound(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	err = eng.Load(context.Background(), "anything")
+	require.Error(t, err)
+}
+
+func TestLuaEngine_LoadMulti(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	eng.SetSource(newMemSourceWith(t, map[string]string{
+		"a": "x = 1",
+		"b": "x = 2",
+	}))
+
+	// gopher-lua only keeps one compiled function at a time, so LoadMulti must
+	// succeed for both keys (the second overwrites the first).
+	require.NoError(t, eng.LoadMulti(context.Background(), []string{"a", "b"}))
+
+	_, err = eng.Execute(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("x")
+	require.NoError(t, err)
+	// The last-loaded script wins.
+	assert.Equal(t, int64(2), v)
+}
+
+func TestLuaEngine_LoadMulti_AbortsOnError(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	eng.SetSource(newMemSourceWith(t, map[string]string{"a": "x = 1"}))
+
+	err = eng.LoadMulti(context.Background(), []string{"a", "missing"})
+	require.Error(t, err)
+}
+
+func TestLuaEngine_ExecuteFromKey(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	eng.SetSource(newMemSourceWith(t, map[string]string{
+		"hello": "answer = 7",
+	}))
+
+	_, err = eng.ExecuteFromKey(context.Background(), "hello")
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("answer")
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), v)
+}
+
+func TestLuaEngine_ExecuteFromKeys_OrderedResults(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	eng.SetSource(newMemSourceWith(t, map[string]string{
+		"a": "xa = 'A'",
+		"b": "xb = 'B'",
+	}))
+
+	_, err = eng.ExecuteFromKeys(context.Background(), []string{"a", "b"})
+	require.NoError(t, err)
+
+	va, err := eng.GetGlobal("xa")
+	require.NoError(t, err)
+	assert.Equal(t, "A", va)
+
+	vb, err := eng.GetGlobal("xb")
+	require.NoError(t, err)
+	assert.Equal(t, "B", vb)
+}
+
+func TestLuaEngine_LoadString_NameIgnored(t *testing.T) {
+	// gopher-lua's LoadString has no notion of a name; LoadString(name, code)
+	// must still work for any name value.
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	require.NoError(t, eng.LoadString(context.Background(), "any-name.lua", "x = 99"))
+	_, err = eng.Execute(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("x")
+	require.NoError(t, err)
+	assert.Equal(t, int64(99), v)
+}
+
+func TestLuaEngine_Load_FromFileSource(t *testing.T) {
+	// End-to-end smoke: bind a FileSource pointing at a temp file, Load it,
+	// then Execute and read a global back.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "script.lua")
+	require.NoError(t, os.WriteFile(path, []byte("fx = 123"), 0o644))
+
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	eng.SetSource(scriptEngine.NewFileSource())
+	require.NoError(t, eng.Load(context.Background(), path))
+
+	_, err = eng.Execute(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("fx")
+	require.NoError(t, err)
+	assert.Equal(t, int64(123), v)
 }
