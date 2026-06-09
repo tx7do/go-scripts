@@ -15,18 +15,12 @@ $ErrorActionPreference = "Stop"
 # Resolve root directory from script location.
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Color helper: only colorize if output is a terminal.
-$UseColor = $Host.UI.RawUI.WindowSize.Width -gt 0
 function Write-Status {
     param(
         [string]$Message,
         [ConsoleColor]$Color = [ConsoleColor]::White
     )
-    if ($UseColor) {
-        Write-Host $Message -ForegroundColor $Color
-    } else {
-        Write-Host $Message
-    }
+    Write-Host $Message -ForegroundColor $Color
 }
 
 function Upgrade-Module {
@@ -40,23 +34,30 @@ function Upgrade-Module {
 
     # go get -u ./...
     Push-Location $ModDir
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
-        $output = go get -u ./... 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
+        $output = & go get -u ./... 2>&1 | Out-String
+        $getCode = $LASTEXITCODE
+        if ($getCode -ne 0) {
+            $ErrorActionPreference = $prevPref
             Write-Status "  X go get -u failed:" ([ConsoleColor]::Red)
             Write-Host $output
             return @{ Success = $false; FailedAt = "go get" }
         }
 
         # go mod tidy
-        $output = go mod tidy 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
+        $output = & go mod tidy 2>&1 | Out-String
+        $tidyCode = $LASTEXITCODE
+        if ($tidyCode -ne 0) {
+            $ErrorActionPreference = $prevPref
             Write-Status "  X go mod tidy failed:" ([ConsoleColor]::Red)
             Write-Host $output
             return @{ Success = $false; FailedAt = "go mod tidy" }
         }
     }
     finally {
+        $ErrorActionPreference = $prevPref
         Pop-Location
     }
 

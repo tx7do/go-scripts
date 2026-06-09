@@ -38,6 +38,7 @@ The Source module defines the core interfaces for script sources, providing unif
 | [consul](consul/README_EN.md) | Consul API | ModifyIndex polling |
 | [redis](redis/README_EN.md) | go-redis/v9 | Value comparison polling |
 | [http](http/README_EN.md) | net/http | CRC32 checksum comparison |
+| [git](git/README_EN.md) | go-git/v6 | commit hash comparison polling |
 
 ---
 
@@ -130,6 +131,7 @@ cd source && go test -v ./...
 - [Consul Source](consul/README_EN.md)
 - [Redis Source](redis/README_EN.md)
 - [HTTP Source](http/README_EN.md)
+- [Git Source](git/README_EN.md)
 
 ## License
 

@@ -38,6 +38,7 @@ Source 模块定义了脚本来源的核心接口，为所有引擎提供统一�
 | [consul](consul/README.md) | Consul API | ModifyIndex 轮询 |
 | [redis](redis/README.md) | go-redis/v9 | 值比对轮询 |
 | [http](http/README.md) | net/http | CRC32 校验和比对 |
+| [git](git/README.md) | go-git/v6 | commit hash 比对轮询 |
 
 ---
 
@@ -130,6 +131,7 @@ cd source && go test -v ./...
 - [Consul Source 文档](consul/README.md)
 - [Redis Source 文档](redis/README.md)
 - [HTTP Source 文档](http/README.md)
+- [Git Source 文档](git/README.md)
 
 ## License
 

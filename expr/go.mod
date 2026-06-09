@@ -5,7 +5,7 @@ go 1.24.0
 replace github.com/tx7do/go-scripts => ../
 
 require (
-	github.com/expr-lang/expr v1.17.0
+	github.com/expr-lang/expr v1.17.8
 	github.com/stretchr/testify v1.11.1
 	github.com/tx7do/go-scripts v0.0.5
 )
