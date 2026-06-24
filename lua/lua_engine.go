@@ -2,7 +2,9 @@ package lua
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	Lua "github.com/yuin/gopher-lua"
@@ -43,6 +45,10 @@ type engine struct {
 	// to enable sandbox mode (drop dangerous libraries such as os/io/package).
 	// See AllowedLib* constants. Guarded by mu.
 	openLibs []string
+
+	// quota is the execution budget applied to ExecuteSync runs. nil means
+	// "no bound". Guarded by mu.
+	quota *scriptEngine.Quota
 
 	// Hot reload state
 	watchers   map[string]context.CancelFunc // key -> cancel func for the watch goroutine
@@ -559,6 +565,123 @@ func (e *engine) snapshotBusinessGlobals() []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Hot-path execution (SyncExecutor / QuotaController)
+////////////////////////////////////////////////////////////////////////////////
+
+// SetQuota configures the execution budget applied to subsequent ExecuteSync
+// runs. The time budget (Quota.Timeout) is enforced via gopher-lua's
+// context-checked main loop, which tests cancellation at every instruction —
+// so a runaway script is interrupted mid-execution rather than blocking the
+// host.
+//
+// NOTE on instruction limits: gopher-lua's debug.sethook is broken for count
+// hooks (it raises "attempt to call a non-function object" regardless of
+// mask), so Quota.MaxInstructions is currently NOT enforced by the Lua engine.
+// Only Quota.Timeout is honored. Use a (tight) Timeout to bound execution.
+//
+// Pass a zero-value Quota to remove any bound.
+func (e *engine) SetQuota(q scriptEngine.Quota) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if q.Timeout == 0 && q.MaxInstructions == 0 {
+		e.quota = nil
+	} else {
+		cp := q
+		e.quota = &cp
+	}
+}
+
+// ExecuteSync runs the last-loaded script synchronously, without spawning a
+// goroutine or allocating a channel — the minimal-overhead path for hot loops
+// (e.g. game per-frame callbacks). It takes e.mu for the duration of the run
+// (gopher-lua's LState is not safe for concurrent use), but avoids the
+// goroutine/channel/select overhead of Execute.
+//
+// If a non-zero Quota.Timeout was set, it is applied via the LState's context
+// (instruction-level cancellation). A run that exceeds its budget returns (or
+// wraps) ErrQuotaExceeded. Quota.MaxInstructions is accepted but not enforced
+// by the Lua engine (see SetQuota note).
+//
+// ctx, if it carries a deadline/cancellation, is also honored (merged with the
+// quota timeout; the stricter deadline wins).
+func (e *engine) ExecuteSync(ctx context.Context) (any, error) {
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return nil, ErrLuaEngineNotInitialized
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.initialized || e.vm == nil {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return nil, ErrLuaEngineNotInitialized
+	}
+
+	L := e.vm.L
+
+	// Compose the time budget: the quota timeout and the caller's ctx. The
+	// stricter (earlier) deadline wins. Setting ctx on the LState switches its
+	// main loop to the per-instruction cancellation check.
+	runCtx, cancel := e.composeRunCtx(ctx)
+	if runCtx != nil {
+		L.SetContext(runCtx)
+		defer func() {
+			cancel()
+			L.RemoveContext()
+		}()
+	} else {
+		cancel()
+	}
+
+	if err := e.vm.Execute(); err != nil {
+		if isQuotaError(err) {
+			wrapped := fmt.Errorf("%w: %v", scriptEngine.ErrQuotaExceeded, err)
+			e.setLastError(wrapped)
+			return nil, wrapped
+		}
+		e.setLastError(err)
+		return nil, err
+	}
+	e.ClearError()
+	return nil, nil
+}
+
+// composeRunCtx builds a context honoring both the quota timeout and the
+// caller's ctx. It returns the context to set on the LState and a cancel func.
+// Returns (nil, cancel) when neither imposes a deadline, meaning the LState
+// needs no context wiring.
+func (e *engine) composeRunCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	cancel := func() {}
+	if e.quota == nil || e.quota.Timeout == 0 {
+		return nil, cancel
+	}
+	quotaCtx, qCancel := context.WithTimeout(context.Background(), e.quota.Timeout)
+	if ctx == nil {
+		return quotaCtx, qCancel
+	}
+	// Merge: derive from the caller's ctx so its cancellation also aborts.
+	merged, mCancel := context.WithTimeout(ctx, e.quota.Timeout)
+	qCancel()
+	return merged, mCancel
+}
+
+// isQuotaError reports whether err resulted from the time-quota mechanism.
+// gopher-lua raises the context's error (context.DeadlineExceeded) as a Lua
+// error via RaiseError, so we detect it by message contents as well as by
+// errors.Is.
+func isQuotaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, scriptEngine.ErrQuotaExceeded) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded")
 }
 
 ////////////////////////////////////////////////////////////////////////////////

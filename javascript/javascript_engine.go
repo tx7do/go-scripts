@@ -2,8 +2,10 @@ package js
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dop251/goja"
 
@@ -41,6 +43,10 @@ type engine struct {
 	mu          sync.RWMutex // protects initialized, programs, source and runtimeHooks
 	execMu      sync.Mutex   // protects runtime
 	lastErrorMu sync.RWMutex // protects lastError
+
+	// quota is the execution budget applied to ExecuteSync runs. nil means
+	// "no bound". Guarded by mu.
+	quota *scriptEngine.Quota
 
 	// Hot reload state
 	watchers   map[string]context.CancelFunc // key -> cancel func for the watch goroutine
@@ -552,6 +558,138 @@ func (e *engine) AddRuntimeHook(hook scriptEngine.RuntimeHook) error {
 		return err
 	}
 	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Hot-path execution (SyncExecutor / QuotaController)
+////////////////////////////////////////////////////////////////////////////////
+
+// SetQuota configures the execution budget applied to subsequent ExecuteSync
+// runs. The time budget (Quota.Timeout) is enforced via goja's Interrupt:
+// a watcher goroutine arms a timer and interrupts the runtime when it fires,
+// aborting the run mid-execution. Quota.MaxInstructions is not enforced by the
+// JS engine (goja has no instruction counter).
+//
+// Pass a zero-value Quota to remove any bound.
+func (e *engine) SetQuota(q scriptEngine.Quota) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if q.Timeout == 0 && q.MaxInstructions == 0 {
+		e.quota = nil
+	} else {
+		cp := q
+		e.quota = &cp
+	}
+}
+
+// ExecuteSync runs every program previously loaded via Load/LoadMulti/LoadString
+// synchronously, without spawning a goroutine per call — the minimal-overhead
+// path for hot loops (e.g. game per-frame callbacks). It avoids the per-call
+// goroutine/channel/select overhead of Execute.
+//
+// If a non-zero Quota.Timeout was set, a watcher goroutine arms a timer and
+// interrupts the goja runtime when it elapses; the interrupted run returns (or
+// wraps) ErrQuotaExceeded. Quota.MaxInstructions is not enforced by the JS
+// engine.
+//
+// Note: the watcher goroutine is only spawned when a timeout quota is set, so
+// the zero-overhead path is preserved when no quota is configured.
+func (e *engine) ExecuteSync(ctx context.Context) (any, error) {
+	if !e.IsInitialized() {
+		e.setLastError(ErrJavascriptEngineNotInitialized)
+		return nil, ErrJavascriptEngineNotInitialized
+	}
+
+	// Snapshot programs.
+	e.mu.RLock()
+	progs := make([]*goja.Program, len(e.programs))
+	copy(progs, e.programs)
+	quota := e.quota
+	e.mu.RUnlock()
+
+	if len(progs) == 0 {
+		e.setLastError(ErrJavascriptNoProgramLoaded)
+		return nil, ErrJavascriptNoProgramLoaded
+	}
+
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
+	if e.runtime == nil {
+		e.setLastError(ErrJavascriptRuntimeNotInitialized)
+		return nil, ErrJavascriptRuntimeNotInitialized
+	}
+
+	// Arm the quota watcher if a timeout is configured. The watcher interrupts
+	// the runtime when the timer fires or the caller's ctx is cancelled. We pass
+	// the runtime reference directly so the watcher never needs execMu (which we
+	// hold here for the whole run) — rt.Interrupt is safe to call concurrently.
+	var stopWatch chan struct{}
+	if quota != nil && quota.Timeout > 0 {
+		stopWatch = make(chan struct{})
+		rt := e.runtime
+		go e.armQuotaWatch(ctx, quota.Timeout, rt, stopWatch)
+	}
+
+	var results []any
+	for _, p := range progs {
+		val, err := e.runtime.RunProgram(p)
+		if err != nil {
+			if stopWatch != nil {
+				close(stopWatch)
+			}
+			if isJSQuotaError(err) {
+				wrapped := fmt.Errorf("%w: %v", scriptEngine.ErrQuotaExceeded, err)
+				e.setLastError(wrapped)
+				return nil, wrapped
+			}
+			e.setLastError(err)
+			return nil, err
+		}
+		if val != nil {
+			results = append(results, val.Export())
+		}
+	}
+	if stopWatch != nil {
+		close(stopWatch)
+	}
+	e.ClearError()
+	return results, nil
+}
+
+// armQuotaWatch interrupts the runtime after timeout, or when ctx is cancelled.
+// It returns when stop is closed, after which the caller owns cleanup. This
+// goroutine is only spawned when a timeout quota is active. It must NOT take
+// execMu (the caller holds it for the whole run); rt.Interrupt is safe to call
+// concurrently with execution.
+func (e *engine) armQuotaWatch(ctx context.Context, timeout time.Duration, rt *goja.Runtime, stop <-chan struct{}) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		if rt != nil {
+			rt.Interrupt(scriptEngine.ErrQuotaExceeded)
+		}
+	case <-ctx.Done():
+		if rt != nil {
+			rt.Interrupt(ctx.Err())
+		}
+	case <-stop:
+	}
+}
+
+// isJSQuotaError reports whether err resulted from a quota/timeout interruption
+// (goja surfaces InterruptedError with the value passed to Interrupt).
+func isJSQuotaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, scriptEngine.ErrQuotaExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// goja returns an InterruptedError whose string carries the interrupt value.
+	msg := err.Error()
+	return msg == scriptEngine.ErrQuotaExceeded.Error() ||
+		msg == context.DeadlineExceeded.Error()
 }
 
 // GetLastError returns the last error recorded by the engine.

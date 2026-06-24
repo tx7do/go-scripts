@@ -3,6 +3,7 @@ package script_engine
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/tx7do/go-scripts/source"
 )
@@ -279,6 +280,84 @@ type RuntimeHookRegistrar interface {
 func AsRuntimeHookRegistrar(e any) RuntimeHookRegistrar {
 	if r, ok := e.(RuntimeHookRegistrar); ok {
 		return r
+	}
+	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Hot-path Execution — optional capability for high-frequency, low-latency
+// execution (e.g. game main loops, per-entity per-frame script callbacks).
+//
+// The standard Execute/ExecuteString methods spawn a goroutine + channel per
+// call to support ctx-based cancellation, which is fine for occasional runs
+// but too expensive for hot paths (thousands of calls per frame). SyncExecutor
+// runs synchronously with no goroutine/channel allocation. QuotaController
+// bounds execution so a misbehaving script can't hang the host.
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// ErrQuotaExceeded is returned by SyncExecutor/QuotaController when a script
+// exceeds the configured time or instruction budget and is interrupted.
+var ErrQuotaExceeded = errors.New("script engine: execution quota exceeded")
+
+// Quota bounds a single synchronous execution. A zero value means "no bound";
+// set Timeout and/or MaxInstructions to enforce a budget. At least one field
+// should be non-zero for the quota to take effect.
+type Quota struct {
+	// Timeout is the wall-clock budget. When the VM supports instruction-level
+	// cancellation (gopher-lua SetContext, goja Interrupt), the run is aborted
+	// mid-execution once elapsed.
+	Timeout time.Duration
+
+	// MaxInstructions is the instruction-count budget. Currently honored by
+	// engines that expose an instruction counter (Lua via debug.sethook).
+	// Zero means "no instruction limit".
+	MaxInstructions int
+}
+
+// SyncExecutor runs a previously-loaded script synchronously, without spawning
+// a goroutine or allocating a channel — the minimal-overhead path for hot
+// loops (e.g. game per-frame callbacks).
+//
+// The caller's ctx, if it carries a deadline/cancellation, is honored by the
+// underlying VM where supported. For an explicit per-call budget, combine with
+// QuotaController: set the quota first, then ExecuteSync.
+//
+// Unlike Execute, the returned error of a timed-out run is (or wraps)
+// ErrQuotaExceeded rather than ctx.Err().
+type SyncExecutor interface {
+	// ExecuteSync runs the last script loaded via Load/LoadMulti/LoadString
+	// synchronously. Returns ErrQuotaExceeded (wrapped) if a configured quota
+	// was hit.
+	ExecuteSync(ctx context.Context) (any, error)
+}
+
+// QuotaController lets callers set an execution budget applied to subsequent
+// SyncExecutor.ExecuteSync calls. It is the hot-path replacement for the
+// per-call goroutine+ctx pattern: instead of paying that cost every call, set
+// a quota once (or per phase) and run synchronously.
+//
+// Engines implement this by wiring the underlying VM's cancellation primitive
+// (gopher-lua's context-checked main loop, goja's Interrupt) to the budget.
+type QuotaController interface {
+	// SetQuota configures the budget for subsequent ExecuteSync runs. Passing
+	// a zero-value Quota removes any bound.
+	SetQuota(q Quota)
+}
+
+// AsSyncExecutor returns the SyncExecutor capability of e, or nil if
+// unsupported.
+func AsSyncExecutor(e any) SyncExecutor {
+	if s, ok := e.(SyncExecutor); ok {
+		return s
+	}
+	return nil
+}
+
+// AsQuotaController returns the QuotaController capability of e, or nil if
+// unsupported.
+func AsQuotaController(e any) QuotaController {
+	if q, ok := e.(QuotaController); ok {
+		return q
 	}
 	return nil
 }

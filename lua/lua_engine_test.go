@@ -794,3 +794,111 @@ func TestLuaEngine_OpenLibs_SandboxDropsDangerous(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(5), v, "string library should still work")
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// Hot-path execution (ExecuteSync / SetQuota)
+////////////////////////////////////////////////////////////////////////////////
+
+// TestLuaEngine_ExecuteSync_Basic verifies the synchronous path runs a loaded
+// script and produces the expected side effects.
+func TestLuaEngine_ExecuteSync_Basic(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	require.NoError(t, eng.LoadString(context.Background(), "hp.lua", `hp_answer = 6 * 7`))
+
+	_, err = eng.ExecuteSync(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("hp_answer")
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), v)
+}
+
+// TestLuaEngine_ExecuteSync_QuotaTimeout verifies the time quota aborts a
+// runaway infinite loop mid-execution (instruction-level cancellation via the
+// LState context), returning ErrQuotaExceeded — and that it does NOT hang.
+func TestLuaEngine_ExecuteSync_QuotaTimeout(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	require.NoError(t, eng.LoadString(context.Background(), "loop.lua",
+		`local i = 0 while true do i = i + 1 end`))
+
+	eng.SetQuota(scriptEngine.Quota{Timeout: 100 * time.Millisecond})
+
+	done := make(chan error, 1)
+	go func() { _, e := eng.ExecuteSync(context.Background()); done <- e }()
+
+	select {
+	case e := <-done:
+		require.Error(t, e)
+		assert.ErrorIs(t, e, scriptEngine.ErrQuotaExceeded,
+			"timed-out sync run should report ErrQuotaExceeded")
+	case <-time.After(3 * time.Second):
+		t.Fatal("ExecuteSync hung; quota did not interrupt the loop")
+	}
+}
+
+// TestLuaEngine_ExecuteSync_QuotaInstructions documents the current limitation:
+// the Lua engine honors Quota.Timeout but does NOT enforce Quota.MaxInstructions,
+// because gopher-lua's debug.sethook is broken for count hooks. This test
+// asserts that a MaxInstructions-only quota does not falsely claim to bound
+// the run (the loop keeps going), so callers know to rely on Timeout.
+//
+// We therefore run a bounded workload instead of an infinite loop and just
+// confirm the quota is accepted without error and the (non-infinite) script
+// completes.
+func TestLuaEngine_ExecuteSync_QuotaInstructions_UnenforcedByLua(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Bounded loop so the test doesn't hang (MaxInstructions won't stop it).
+	require.NoError(t, eng.LoadString(context.Background(), "bounded.lua",
+		`local s = 0 for i = 1, 1000 do s = s + i end hp_sum = s`))
+
+	eng.SetQuota(scriptEngine.Quota{MaxInstructions: 1000}) // accepted, not enforced
+	_, err = eng.ExecuteSync(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("hp_sum")
+	require.NoError(t, err)
+	assert.Equal(t, int64(500500), v) // sum 1..1000 = 500500
+}
+
+// TestLuaEngine_ExecuteSync_QuotaClear verifies that a cleared quota allows an
+// unbounded run to complete (sanity for the zero-value reset path).
+func TestLuaEngine_ExecuteSync_QuotaClear(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// First set, then clear.
+	eng.SetQuota(scriptEngine.Quota{Timeout: 50 * time.Millisecond})
+	eng.SetQuota(scriptEngine.Quota{}) // zero value -> no bound
+
+	require.NoError(t, eng.LoadString(context.Background(), "hp.lua", `hp_done = 1`))
+	_, err = eng.ExecuteSync(context.Background())
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("hp_done")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), v)
+}
+
+// TestLuaEngine_ExecuteSync_AsCapability verifies the hot-path capability is
+// detected via the helpers.
+func TestLuaEngine_ExecuteSync_AsCapability(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	require.NotNil(t, scriptEngine.AsSyncExecutor(eng), "lua engine should implement SyncExecutor")
+	require.NotNil(t, scriptEngine.AsQuotaController(eng), "lua engine should implement QuotaController")
+}
