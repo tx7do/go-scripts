@@ -29,11 +29,16 @@ type engine struct {
 	runtime  *goja.Runtime   // the JavaScript runtime
 	programs []*goja.Program // compiled programs queued for execution
 
+	// runtimeHooks are replayed on the runtime right after Init, before any
+	// Load*/Execute*. They let callers inject modules, host functions and
+	// reverse callbacks. Guarded by mu.
+	runtimeHooks []scriptEngine.RuntimeHook
+
 	source      source.Reader // optional script source (File / S3 / Mem / ...)
 	initialized bool
 	lastError   error
 
-	mu          sync.RWMutex // protects initialized, programs and source
+	mu          sync.RWMutex // protects initialized, programs, source and runtimeHooks
 	execMu      sync.Mutex   // protects runtime
 	lastErrorMu sync.RWMutex // protects lastError
 
@@ -56,24 +61,38 @@ func (e *engine) GetType() scriptEngine.Type {
 }
 
 // Init initializes the engine.
-func (e *engine) Init(_ context.Context) error {
+func (e *engine) Init(ctx context.Context) error {
 	newRt := goja.New()
 
+	// Set up the runtime under the locks, then replay any hooks registered
+	// before Init *after* releasing them — hooks call back into the engine
+	// (e.g. RegisterFunction acquires execMu), which would self-deadlock if
+	// we held the locks during replay.
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if e.initialized {
 		e.setLastError(ErrJavascriptEngineAlreadyInitialized)
+		e.mu.Unlock()
 		return ErrJavascriptEngineAlreadyInitialized
 	}
 
 	e.execMu.Lock()
-	defer e.execMu.Unlock()
-
 	e.runtime = newRt
-
 	e.initialized = true
 	e.lastError = nil
+
+	hooks := append([]scriptEngine.RuntimeHook(nil), e.runtimeHooks...)
+	e.execMu.Unlock()
+	e.mu.Unlock()
+
+	// Replay hooks outside the engine locks. Each hook typically calls
+	// RegisterFunction/RegisterModule/RegisterGlobal, which take execMu
+	// themselves, so we must not hold it here.
+	for _, h := range hooks {
+		if err := h(ctx); err != nil {
+			e.setLastError(err)
+			return err
+		}
+	}
 
 	return nil
 }
@@ -502,9 +521,38 @@ func (e *engine) RegisterModule(name string, module any) error {
 	return nil
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Error handling
-////////////////////////////////////////////////////////////////////////////////
+// AddRuntimeHook registers a RuntimeHook to run on the runtime. If the engine
+// is already initialized, the hook runs immediately on the live runtime;
+// otherwise it is deferred until Init completes.
+//
+// Hooks typically inject business modules, host functions or reverse callbacks
+// (e.g. a Go-side "register" function that scripts call to hand their
+// callbacks back to Go).
+func (e *engine) AddRuntimeHook(hook scriptEngine.RuntimeHook) error {
+	if hook == nil {
+		return nil
+	}
+
+	// Snapshot initialized state under mu and append the hook.
+	e.mu.Lock()
+	e.runtimeHooks = append(e.runtimeHooks, hook)
+	initialized := e.initialized
+	e.mu.Unlock()
+
+	if !initialized {
+		// Deferred: Init will replay it.
+		return nil
+	}
+
+	// Already initialized: run the hook immediately on the live runtime.
+	// Hooks usually call RegisterFunction/RegisterModule, which take execMu
+	// themselves, so we must NOT hold execMu here.
+	if err := hook(context.Background()); err != nil {
+		e.setLastError(err)
+		return err
+	}
+	return nil
+}
 
 // GetLastError returns the last error recorded by the engine.
 func (e *engine) GetLastError() error {

@@ -749,3 +749,58 @@ func (nonWatcherSource) Load(_ context.Context, _ string) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
 func (nonWatcherSource) Close() error { return nil }
+
+////////////////////////////////////////////////////////////////////////////////
+// Runtime Hooks
+////////////////////////////////////////////////////////////////////////////////
+
+// TestGPythonEngine_RuntimeHook_BeforeInit verifies that a hook registered
+// before Init is replayed once Init completes, so the injected host function
+// is callable.
+func TestGPythonEngine_RuntimeHook_BeforeInit(t *testing.T) {
+	eng, err := newGPythonEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// Register the hook BEFORE Init. It exposes a Go function "greet".
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", func(name string) string {
+			return "hi " + name
+		})
+	}))
+
+	// Init replays the hook.
+	require.NoError(t, eng.Init(context.Background()))
+
+	// gpython dispatches host functions directly, so we can verify end-to-end.
+	res, err := eng.CallFunction(context.Background(), "greet", "world")
+	require.NoError(t, err)
+	assert.Equal(t, "hi world", res)
+}
+
+// TestGPythonEngine_RuntimeHook_AfterInit verifies that a hook registered after
+// Init runs immediately on the live module.
+func TestGPythonEngine_RuntimeHook_AfterInit(t *testing.T) {
+	eng := newTestEngine(t)
+
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", func(name string) string {
+			return "hello " + name
+		})
+	}))
+
+	res, err := eng.CallFunction(context.Background(), "greet", "bob")
+	require.NoError(t, err)
+	assert.Equal(t, "hello bob", res)
+}
+
+// TestGPythonEngine_RuntimeHook_AsCapability verifies the optional capability
+// is detected via the helper.
+func TestGPythonEngine_RuntimeHook_AsCapability(t *testing.T) {
+	eng, err := newGPythonEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	r := scriptEngine.AsRuntimeHookRegistrar(eng)
+	require.NotNil(t, r, "gpython engine should implement RuntimeHookRegistrar")
+}

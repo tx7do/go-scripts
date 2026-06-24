@@ -27,6 +27,17 @@ type engine struct {
 	mu          sync.RWMutex  // protects vm, initialized and source
 	lastErrorMu sync.Mutex    // protects lastError
 
+	// Runtime hooks are replayed on the LState right after Init, before any
+	// Load*/Execute*. They let callers inject modules, host functions and
+	// reverse callbacks. Guarded by mu.
+	runtimeHooks []scriptEngine.RuntimeHook
+
+	// businessGlobals records the global names registered via
+	// RegisterGlobal / RegisterFunction / RegisterModule. These are stripped
+	// from the LState before it is returned to the pool, so recycled LStates
+	// don't leak a previous engine's business globals. Guarded by mu.
+	businessGlobals map[string]struct{}
+
 	// Hot reload state
 	watchers   map[string]context.CancelFunc // key -> cancel func for the watch goroutine
 	watchersMu sync.Mutex                    // protects watchers
@@ -46,18 +57,33 @@ func (e *engine) GetType() scriptEngine.Type {
 }
 
 // Init initializes the engine.
-func (e *engine) Init(_ context.Context) error {
+func (e *engine) Init(ctx context.Context) error {
+	// Create the VM under the lock, then replay any hooks registered before
+	// Init *after* releasing the lock — hooks call back into the engine
+	// (RegisterGlobal/RegisterFunction acquire e.mu), which would self-deadlock
+	// if we held the lock during replay.
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if e.initialized {
 		e.setLastError(ErrLuaEngineAlreadyInitialized)
+		e.mu.Unlock()
 		return ErrLuaEngineAlreadyInitialized
 	}
 
 	e.vm = newVirtualMachine()
+	e.businessGlobals = make(map[string]struct{})
 	e.initialized = true
 	e.ClearError()
+
+	hooks := append([]scriptEngine.RuntimeHook(nil), e.runtimeHooks...)
+	e.mu.Unlock()
+
+	// Replay hooks outside the engine lock.
+	for _, h := range hooks {
+		if err := h(ctx); err != nil {
+			e.setLastError(err)
+			return err
+		}
+	}
 
 	return nil
 }
@@ -75,8 +101,13 @@ func (e *engine) Close() error {
 	// Stop all active watchers.
 	e.stopAllWatchers()
 
+	// Strip business globals so the recycled LState doesn't leak them to a
+	// future engine instance that borrows it from the pool.
+	e.vm.ClearGlobals(e.snapshotBusinessGlobals())
+
 	e.vm.Destroy()
 	e.vm = nil
+	e.businessGlobals = nil
 	e.initialized = false
 
 	return nil
@@ -309,6 +340,7 @@ func (e *engine) RegisterGlobal(name string, value any) error {
 	}
 
 	e.vm.BindStruct(name, value)
+	e.recordBusinessGlobal(name)
 
 	e.ClearError()
 	return nil
@@ -344,6 +376,7 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 	// Type assertion: only Lua.LGFunction is accepted.
 	if lf, ok := fn.(Lua.LGFunction); ok {
 		e.vm.RegisterFunction(name, lf)
+		e.recordBusinessGlobal(name)
 		e.ClearError()
 		return nil
 	}
@@ -429,6 +462,7 @@ func (e *engine) RegisterModule(name string, module any) error {
 
 	if mod, ok := module.(Lua.LGFunction); ok {
 		e.vm.RegisterModule(name, mod)
+		e.recordBusinessGlobal(name)
 		e.ClearError()
 		return nil
 	}
@@ -436,6 +470,68 @@ func (e *engine) RegisterModule(name string, module any) error {
 	err := fmt.Errorf("module must be of type Lua.LGFunction")
 	e.setLastError(err)
 	return err
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Runtime Hooks
+////////////////////////////////////////////////////////////////////////////////
+
+// AddRuntimeHook registers a RuntimeHook to run on the LState. If the engine is
+// already initialized, the hook runs immediately; otherwise it is deferred
+// until Init completes.
+//
+// Hooks typically inject business modules, host functions or reverse callbacks
+// (e.g. a Go-side "hook.register" that scripts call to hand their callbacks
+// back to Go). Globals/functions registered by hooks (or by any RegisterGlobal
+// / RegisterFunction / RegisterModule call) are tracked as "business globals"
+// and stripped from the LState before it returns to the pool, so recycled
+// LStates stay isolated across engine instances.
+func (e *engine) AddRuntimeHook(hook scriptEngine.RuntimeHook) error {
+	if hook == nil {
+		return nil
+	}
+
+	e.mu.Lock()
+	e.runtimeHooks = append(e.runtimeHooks, hook)
+	initialized := e.initialized
+	e.mu.Unlock()
+
+	if !initialized {
+		// Deferred: Init will replay it.
+		return nil
+	}
+
+	// Already initialized: run the hook immediately. Hooks usually call
+	// RegisterFunction/RegisterModule, which take e.mu themselves, so we must
+	// NOT hold it here.
+	if err := hook(context.Background()); err != nil {
+		e.setLastError(err)
+		return err
+	}
+	return nil
+}
+
+// recordBusinessGlobal remembers a global name registered through the engine
+// API so it can be cleared before the LState returns to the pool. Caller must
+// hold e.mu.
+func (e *engine) recordBusinessGlobal(name string) {
+	if e.businessGlobals == nil {
+		e.businessGlobals = make(map[string]struct{})
+	}
+	e.businessGlobals[name] = struct{}{}
+}
+
+// snapshotBusinessGlobals returns a copy of the tracked business-global names.
+// Caller must hold e.mu.
+func (e *engine) snapshotBusinessGlobals() []string {
+	if len(e.businessGlobals) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(e.businessGlobals))
+	for name := range e.businessGlobals {
+		names = append(names, name)
+	}
+	return names
 }
 
 ////////////////////////////////////////////////////////////////////////////////

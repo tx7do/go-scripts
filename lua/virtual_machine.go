@@ -39,8 +39,17 @@ func GetRunPath() string {
 }
 
 // init opens the standard Lua libs and preloads extras (gopher-lua-libs,
-// gluacrypto, ...) and registers a GetLuaPath helper.
+// gluacrypto, ...) and registers a GetLuaPath helper. This establishes the
+// engine's built-in globals; business globals injected by RuntimeHooks are
+// tracked separately by the engine so they can be cleared before the LState is
+// returned to the pool.
 func (e *virtualMachine) init() {
+	e.initBuiltinLibs()
+}
+
+// initBuiltinLibs opens the standard Lua libs and preloads extras
+// (gopher-lua-libs, gluacrypto, ...) and registers a GetLuaPath helper.
+func (e *virtualMachine) initBuiltinLibs() {
 
 	e.L.OpenLibs()
 
@@ -55,6 +64,20 @@ func (e *virtualMachine) init() {
 		e.L.Push(Lua.LString(GetRunPath() + "/script"))
 		return 1
 	})
+}
+
+// ClearGlobals removes the named globals from the LState by setting them to
+// nil. It is used by the engine to strip business globals before returning the
+// LState to the pool, so recycled LStates don't leak globals from a previous
+// engine instance. Built-in globals (standard library, GetLuaPath, ...) are
+// untouched since they are not in the business set.
+func (e *virtualMachine) ClearGlobals(names []string) {
+	if e.L == nil {
+		return
+	}
+	for _, name := range names {
+		e.L.SetGlobal(name, Lua.LNil)
+	}
 }
 
 // Destroy returns the borrowed Lua state to the pool.

@@ -223,3 +223,62 @@ func AsWatcher(e any) ScriptWatcher {
 	}
 	return nil
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Runtime Initialization Hooks — optional capability for injecting host modules /
+// functions / reverse callbacks (e.g. a Go-side hook.register exposed to scripts)
+// into the runtime/VM after Init and before any Load*/Execute*.
+//
+// Lightweight engines (CEL, Expr, Starlark, Tcl, wazero) typically do NOT
+// implement this; callers should use AsRuntimeHookRegistrar to detect support
+// and gracefully degrade.
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// RuntimeHook is invoked after the engine's runtime/VM is created and ready,
+// before any Load*/Execute*. It lets the caller inject business modules, host
+// functions and reverse callbacks into the runtime.
+//
+// For example, a hook may register a Go function under a name like
+// "hook.register" so that scripts can hand their callbacks back to Go:
+//
+//	lua.AddRuntimeHook(func(ctx context.Context) error {
+//	    lua.RegisterFunction("hook.register", func(L *lua.LState) int {
+//	        name := L.CheckString(1)
+//	        fn   := L.CheckFunction(2)
+//	        // store fn in a Go-side registry for later dispatch
+//	        return 0
+//	    })
+//	    return nil
+//	})
+//
+// Engines that pool and reuse runtimes (e.g. the Lua LState pool) must replay
+// every registered hook on each (re)acquired runtime, clearing any business
+// globals the previous owner injected first, so each engine instance stays
+// isolated.
+type RuntimeHook func(ctx context.Context) error
+
+// RuntimeHookRegistrar is the optional capability interface for engines that
+// accept one or more RuntimeHooks.
+//
+// Engine implementers must guarantee:
+//   - hooks registered before Init run during/after Init, before any
+//     Load*/Execute*;
+//   - hooks registered after Init run immediately on the live runtime;
+//   - when a runtime is pooled and reused across engine instances, the business
+//     globals injected by a previous owner are cleared and the current owner's
+//     hooks replayed on each (re)acquisition, so instances stay isolated.
+type RuntimeHookRegistrar interface {
+	// AddRuntimeHook registers a hook to run on the runtime. Calling it before
+	// Init defers execution until Init completes; calling it after Init runs
+	// the hook immediately on the live runtime.
+	AddRuntimeHook(hook RuntimeHook) error
+}
+
+// AsRuntimeHookRegistrar returns the RuntimeHookRegistrar capability of e, or
+// nil if the engine does not support runtime hooks.
+func AsRuntimeHookRegistrar(e any) RuntimeHookRegistrar {
+	if r, ok := e.(RuntimeHookRegistrar); ok {
+		return r
+	}
+	return nil
+}

@@ -14,6 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	Lua "github.com/yuin/gopher-lua"
+
+	scriptEngine "github.com/tx7do/go-scripts"
 	"github.com/tx7do/go-scripts/source"
 )
 
@@ -524,3 +527,198 @@ type readerOnly struct {
 
 func (r *readerOnly) Load(_ context.Context, _ string) (string, error) { return r.code, nil }
 func (r *readerOnly) Close() error                                     { return nil }
+
+////////////////////////////////////////////////////////////////////////////////
+// Runtime Hooks
+////////////////////////////////////////////////////////////////////////////////
+
+// TestLuaEngine_RuntimeHook_BeforeInit verifies that a hook registered before
+// Init is replayed once Init completes, so the injected host function is
+// callable from Lua.
+func TestLuaEngine_RuntimeHook_BeforeInit(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// Register the hook BEFORE Init. It exposes a Go function "greet".
+	// Note: the function must be declared as Lua.LGFunction (a named type) so
+	// RegisterFunction's type assertion (fn.(Lua.LGFunction)) succeeds; an
+	// anonymous func(*Lua.LState) int passed through `any` would not match.
+	var greet Lua.LGFunction = func(L *Lua.LState) int {
+		name := L.CheckString(1)
+		L.Push(Lua.LString("hi " + name))
+		return 1
+	}
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", greet)
+	}))
+
+	// Init replays the hook.
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Lua can call the hook-injected function.
+	_, err = eng.ExecuteString(context.Background(), "hook.lua", `
+        local r = greet("world")
+        greet_result = r
+    `)
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("greet_result")
+	require.NoError(t, err)
+	assert.Equal(t, "hi world", v)
+}
+
+// TestLuaEngine_RuntimeHook_AfterInit verifies that a hook registered after
+// Init runs immediately on the live LState.
+func TestLuaEngine_RuntimeHook_AfterInit(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	var greet2 Lua.LGFunction = func(L *Lua.LState) int {
+		name := L.CheckString(1)
+		L.Push(Lua.LString("hello " + name))
+		return 1
+	}
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", greet2)
+	}))
+
+	res, err := eng.CallFunction(context.Background(), "greet", "bob")
+	require.NoError(t, err)
+	assert.Equal(t, "hello bob", res)
+}
+
+// TestLuaEngine_RuntimeHook_PoolReuse_Isolation verifies that business globals
+// injected by one engine are cleared before its LState returns to the pool, so
+// a second engine that recycles the same LState does NOT see them.
+//
+// This is the core isolation guarantee for the global LState pool.
+func TestLuaEngine_RuntimeHook_PoolReuse_Isolation(t *testing.T) {
+	ctx := context.Background()
+
+	// Engine A: injects a business global "secret_a".
+	engA, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NoError(t, engA.Init(ctx))
+	require.NoError(t, engA.AddRuntimeHook(func(context.Context) error {
+		return engA.RegisterGlobal("secret_a", "from-A")
+	}))
+	// Confirm A sees its global.
+	v, err := engA.GetGlobal("secret_a")
+	require.NoError(t, err)
+	assert.Equal(t, "from-A", v)
+	// Close A — its LState returns to the pool, stripped of secret_a.
+	require.NoError(t, engA.Close())
+
+	// Engine B: reuses a LState from the pool. It must NOT see secret_a.
+	engB, err := newLuaEngine()
+	require.NoError(t, err)
+	defer engB.Close()
+	require.NoError(t, engB.Init(ctx))
+
+	// secret_a must be gone (cleared by A's Close).
+	v, err = engB.GetGlobal("secret_a")
+	// GetGlobal on a cleared global returns nil (LNil -> nil), no error.
+	require.NoError(t, err)
+	assert.Nil(t, v, "recycled LState must not leak secret_a from engine A")
+
+	// But B's own injection works.
+	require.NoError(t, engB.RegisterGlobal("secret_b", "from-B"))
+	v, err = engB.GetGlobal("secret_b")
+	require.NoError(t, err)
+	assert.Equal(t, "from-B", v)
+
+	// Standard library is intact on the recycled LState.
+	_, err = engB.ExecuteString(ctx, "stdlib.lua", `x = string.len("abcde")`)
+	require.NoError(t, err)
+	v, err = engB.GetGlobal("x")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), v)
+}
+
+// TestLuaEngine_RuntimeHook_ReverseRegister verifies a hook can expose a
+// Go-side registry function so that Lua scripts register callbacks back into
+// Go (the "reverse registration" capability). Go then dispatches the stored
+// Lua callback.
+func TestLuaEngine_RuntimeHook_ReverseRegister(t *testing.T) {
+	ctx := context.Background()
+
+	// Go-side hook registry: name -> Lua function.
+	hooks := make(map[string]*Lua.LFunction)
+	var hooksMu sync.Mutex
+
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// The hook exposes hook.register(name, fn) to Lua. Lua passes a Lua
+	// function, which Go stores for later dispatch.
+	var hookRegister Lua.LGFunction = func(L *Lua.LState) int {
+		name := L.CheckString(1)
+		fn := L.CheckFunction(2)
+		hooksMu.Lock()
+		hooks[name] = fn
+		hooksMu.Unlock()
+		return 0
+	}
+	require.NoError(t, eng.AddRuntimeHook(func(context.Context) error {
+		return eng.RegisterFunction("hook_register", hookRegister)
+	}))
+	require.NoError(t, eng.Init(ctx))
+
+	// Lua script registers a callback "on_event".
+	_, err = eng.ExecuteString(ctx, "reg.lua", `
+        hook_register("on_event", function(payload)
+            return "processed:" .. payload
+        end)
+    `)
+	require.NoError(t, err)
+
+	// Go retrieves the stored Lua function and dispatches it.
+	hooksMu.Lock()
+	fn := hooks["on_event"]
+	hooksMu.Unlock()
+	require.NotNil(t, fn, "Lua callback should have been registered into Go")
+
+	// Dispatch via the engine's LState using CallByParam.
+	var ran int32
+	done := make(chan any, 1)
+	go func() {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		atomic.StoreInt32(&ran, 1)
+		if err := eng.vm.L.CallByParam(Lua.P{
+			Fn:      fn,
+			NRet:    1,
+			Protect: true,
+		}, Lua.LString("data")); err != nil {
+			done <- err
+			return
+		}
+		ret := eng.vm.L.Get(-1)
+		eng.vm.L.Pop(1)
+		done <- eng.vm.convertFromLValue(ret)
+	}()
+
+	select {
+	case res := <-done:
+		require.NoError(t, nil)
+		assert.Equal(t, "processed:data", res)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&ran))
+	case <-time.After(2 * time.Second):
+		t.Fatal("reverse dispatch timed out")
+	}
+}
+
+// TestLuaEngine_RuntimeHook_AsCapability verifies the optional capability is
+// detected via the helper.
+func TestLuaEngine_RuntimeHook_AsCapability(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	r := scriptEngine.AsRuntimeHookRegistrar(eng)
+	require.NotNil(t, r, "lua engine should implement RuntimeHookRegistrar")
+}

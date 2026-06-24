@@ -56,11 +56,16 @@ type engine struct {
 	// They are injected into the module globals as Python functions.
 	hostFuncs map[string]any
 
+	// runtimeHooks are replayed on the module right after Init, before any
+	// Load*/Execute*. They let callers inject modules, host functions and
+	// reverse callbacks. Guarded by mu.
+	runtimeHooks []scriptEngine.RuntimeHook
+
 	source      source.Reader
 	initialized bool
 	lastError   error
 
-	mu          sync.RWMutex // protects initialized, scripts, source, hostFuncs
+	mu          sync.RWMutex // protects initialized, scripts, source, hostFuncs, runtimeHooks
 	execMu      sync.Mutex   // protects ctx, module
 	lastErrorMu sync.RWMutex // protects lastError
 
@@ -83,18 +88,19 @@ func (e *engine) GetType() scriptEngine.Type {
 }
 
 // Init initializes the engine by creating a fresh gpython context and module.
-func (e *engine) Init(_ context.Context) error {
+func (e *engine) Init(ctx context.Context) error {
+	// Set up the context/module under the locks, then replay any hooks
+	// registered before Init *after* releasing them — hooks call back into
+	// the engine (e.g. RegisterFunction acquires execMu), which would
+	// self-deadlock if we held the locks during replay.
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if e.initialized {
 		e.setLastError(ErrGPythonEngineAlreadyInitialized)
+		e.mu.Unlock()
 		return ErrGPythonEngineAlreadyInitialized
 	}
 
 	e.execMu.Lock()
-	defer e.execMu.Unlock()
-
 	e.ctx = py.NewContext(py.DefaultContextOpts())
 
 	mainImpl := py.ModuleImpl{
@@ -103,6 +109,8 @@ func (e *engine) Init(_ context.Context) error {
 
 	mod, err := e.ctx.ModuleInit(&mainImpl)
 	if err != nil {
+		e.execMu.Unlock()
+		e.mu.Unlock()
 		wrapped := fmt.Errorf("gpython engine: init module: %w", err)
 		e.setLastError(wrapped)
 		return wrapped
@@ -113,6 +121,18 @@ func (e *engine) Init(_ context.Context) error {
 	e.scripts = nil
 	e.initialized = true
 	e.lastError = nil
+
+	hooks := append([]scriptEngine.RuntimeHook(nil), e.runtimeHooks...)
+	e.execMu.Unlock()
+	e.mu.Unlock()
+
+	// Replay hooks outside the engine locks.
+	for _, h := range hooks {
+		if err := h(ctx); err != nil {
+			e.setLastError(err)
+			return err
+		}
+	}
 
 	return nil
 }
@@ -563,9 +583,35 @@ func (e *engine) RegisterModule(name string, module any) error {
 	return nil
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Error handling
-////////////////////////////////////////////////////////////////////////////////
+// AddRuntimeHook registers a RuntimeHook to run on the module. If the engine
+// is already initialized, the hook runs immediately; otherwise it is deferred
+// until Init completes.
+//
+// Hooks typically inject business modules, host functions or reverse callbacks
+// into the module globals.
+func (e *engine) AddRuntimeHook(hook scriptEngine.RuntimeHook) error {
+	if hook == nil {
+		return nil
+	}
+
+	e.mu.Lock()
+	e.runtimeHooks = append(e.runtimeHooks, hook)
+	initialized := e.initialized
+	e.mu.Unlock()
+
+	if !initialized {
+		// Deferred: Init will replay it.
+		return nil
+	}
+
+	// Already initialized: run the hook immediately. Hooks usually call
+	// RegisterFunction/RegisterModule, which take execMu themselves.
+	if err := hook(context.Background()); err != nil {
+		e.setLastError(err)
+		return err
+	}
+	return nil
+}
 
 func (e *engine) GetLastError() error {
 	e.lastErrorMu.RLock()
