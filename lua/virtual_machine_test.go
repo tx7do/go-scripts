@@ -21,7 +21,7 @@ func (u *user) Token() string {
 }
 
 func TestVirtualMachine_ExecuteString(t *testing.T) {
-	exe := newVirtualMachine()
+	exe := newVirtualMachine(nil)
 	defer exe.Destroy()
 
 	luaString := `
@@ -59,7 +59,7 @@ print("hello")`
 }
 
 func TestVirtualMachine_ExecuteFile(t *testing.T) {
-	exe := newVirtualMachine()
+	exe := newVirtualMachine(nil)
 	defer exe.Destroy()
 
 	err := exe.LoadFile("./script/test.lua")
@@ -78,7 +78,7 @@ func TestVirtualMachine_ExecuteFile(t *testing.T) {
 }
 
 func TestVirtualMachine_HttpModule(t *testing.T) {
-	exe := newVirtualMachine()
+	exe := newVirtualMachine(nil)
 	defer exe.Destroy()
 
 	err := exe.LoadFile("./script/test_http.lua")
@@ -89,7 +89,7 @@ func TestVirtualMachine_HttpModule(t *testing.T) {
 }
 
 func TestVirtualMachine_LoadModule(t *testing.T) {
-	exe := newVirtualMachine()
+	exe := newVirtualMachine(nil)
 	defer exe.Destroy()
 
 	err := exe.LoadFile("./script/test_load_module.lua")
@@ -100,7 +100,7 @@ func TestVirtualMachine_LoadModule(t *testing.T) {
 }
 
 func TestVirtualMachine_CryptoModule(t *testing.T) {
-	exe := newVirtualMachine()
+	exe := newVirtualMachine(nil)
 	defer exe.Destroy()
 
 	err := exe.LoadFile("./script/test_crypto.lua")
@@ -111,7 +111,7 @@ func TestVirtualMachine_CryptoModule(t *testing.T) {
 }
 
 func TestVirtualMachine_Debugger(t *testing.T) {
-	exe := newVirtualMachine()
+	exe := newVirtualMachine(nil)
 	defer exe.Destroy()
 
 	err := exe.LoadFile("./script/test_debugger.lua")

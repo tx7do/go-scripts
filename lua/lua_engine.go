@@ -38,6 +38,12 @@ type engine struct {
 	// don't leak a previous engine's business globals. Guarded by mu.
 	businessGlobals map[string]struct{}
 
+	// openLibs selects which standard libraries the VM opens at init. nil/empty
+	// means "open all" (the backward-compatible default). Set via SetOpenLibs
+	// to enable sandbox mode (drop dangerous libraries such as os/io/package).
+	// See AllowedLib* constants. Guarded by mu.
+	openLibs []string
+
 	// Hot reload state
 	watchers   map[string]context.CancelFunc // key -> cancel func for the watch goroutine
 	watchersMu sync.Mutex                    // protects watchers
@@ -56,6 +62,27 @@ func (e *engine) GetType() scriptEngine.Type {
 	return scriptEngine.LuaType
 }
 
+// SetOpenLibs configures which standard Lua libraries the VM opens at init.
+//
+// With no call (or nil/empty), all standard libraries open — the original,
+// backward-compatible behavior.
+//
+// Pass an explicit list to enable sandbox mode and drop dangerous libraries.
+// Valid names are the AllowedLib* constants (e.g. AllowedLibOs, AllowedLibIo,
+// AllowedLibLoad). Unknown names are ignored. Must be called before Init.
+//
+// Example — open everything except os and io:
+//
+//	eng.SetOpenLibs(
+//	    lua.AllowedLibBase, lua.AllowedLibLoad, lua.AllowedLibTab,
+//	    lua.AllowedLibStr, lua.AllowedLibMath, lua.AllowedLibCoroutine,
+//	)
+func (e *engine) SetOpenLibs(libs ...string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.openLibs = libs
+}
+
 // Init initializes the engine.
 func (e *engine) Init(ctx context.Context) error {
 	// Create the VM under the lock, then replay any hooks registered before
@@ -69,7 +96,7 @@ func (e *engine) Init(ctx context.Context) error {
 		return ErrLuaEngineAlreadyInitialized
 	}
 
-	e.vm = newVirtualMachine()
+	e.vm = newVirtualMachine(e.openLibs)
 	e.businessGlobals = make(map[string]struct{})
 	e.initialized = true
 	e.ClearError()

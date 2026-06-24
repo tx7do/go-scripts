@@ -1,7 +1,7 @@
 ﻿git tag v0.0.7
 
 git tag javascript/v0.0.7 --force
-git tag lua/v0.0.7 --force
+git tag lua/v0.0.8 --force
 git tag wazero/v0.0.2 --force
 git tag yaegi/v0.0.2 --force
 git tag cel/v0.0.2 --force

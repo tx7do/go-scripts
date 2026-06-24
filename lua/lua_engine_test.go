@@ -722,3 +722,75 @@ func TestLuaEngine_RuntimeHook_AsCapability(t *testing.T) {
 	r := scriptEngine.AsRuntimeHookRegistrar(eng)
 	require.NotNil(t, r, "lua engine should implement RuntimeHookRegistrar")
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// OpenLibs sandbox
+////////////////////////////////////////////////////////////////////////////////
+
+// TestLuaEngine_OpenLibs_DefaultOpensAll verifies the default (no SetOpenLibs)
+// keeps all standard libraries available, including the dangerous ones — i.e.
+// backward compatibility.
+func TestLuaEngine_OpenLibs_DefaultOpensAll(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// os and io should be available by default.
+	_, err = eng.ExecuteString(context.Background(), "default.lua",
+		`_G.os_time = os.time()`)
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("os_time")
+	require.NoError(t, err)
+	assert.NotNil(t, v)
+
+	// string library works too.
+	_, err = eng.ExecuteString(context.Background(), "default2.lua",
+		`_G.strlen = string.len("hello")`)
+	require.NoError(t, err)
+	v, err = eng.GetGlobal("strlen")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), v)
+}
+
+// TestLuaEngine_OpenLibs_SandboxDropsDangerous verifies that when SetOpenLibs
+// excludes os and io, scripts can no longer access them — the sandbox is
+// actually enforced.
+func TestLuaEngine_OpenLibs_SandboxDropsDangerous(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// Sandbox: open base/table/string/math/coroutine only — no os, no io, no
+	// package (require).
+	eng.SetOpenLibs(
+		AllowedLibBase, AllowedLibTab, AllowedLibStr, AllowedLibMath, AllowedLibCoroutine,
+	)
+	require.NoError(t, eng.Init(context.Background()))
+
+	// os must be unavailable.
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua",
+		`_G.os_type = type(os)`)
+	if assert.NoError(t, err) {
+		v, gerr := eng.GetGlobal("os_type")
+		require.NoError(t, gerr)
+		assert.Equal(t, "nil", v, "os library should be dropped in sandbox mode")
+	}
+
+	// io must be unavailable too.
+	_, err = eng.ExecuteString(context.Background(), "sandbox2.lua",
+		`_G.io_type = type(io)`)
+	if assert.NoError(t, err) {
+		v, gerr := eng.GetGlobal("io_type")
+		require.NoError(t, gerr)
+		assert.Equal(t, "nil", v, "io library should be dropped in sandbox mode")
+	}
+
+	// But whitelisted libraries still work.
+	_, err = eng.ExecuteString(context.Background(), "sandbox3.lua",
+		`_G.strlen = string.len("hello")`)
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("strlen")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), v, "string library should still work")
+}
