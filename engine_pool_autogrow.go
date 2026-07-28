@@ -9,12 +9,33 @@ import (
 	"github.com/tx7do/go-scripts/source"
 )
 
+// EngineFactoryFunc is the factory signature used by
+// [NewAutoGrowEnginePoolWithFactory] to create a fully-initialized Engine
+// instance. The factory owns BOTH construction and Init, so it can also apply
+// per-instance configuration that must happen before Init — for example a Lua
+// engine's sandbox allow-list (SetOpenLibs) or injecting global functions.
+//
+// The returned Engine MUST already be Init'd; the pool does not call Init.
+type EngineFactoryFunc func(ctx context.Context) (Engine, error)
+
 // AutoGrowEnginePool is an Engine pool that can grow on demand up to a configured
 // maximum. Idle instances are reused; when none is available and the cap has not
 // been reached, a new Engine is created on the fly.
+//
+// Instances are produced by factory; when the pool is built via
+// [NewAutoGrowEnginePool] (the type-based constructor), factory wraps the
+// registered factory for typ and performs Init internally, preserving the
+// historical behavior.
 type AutoGrowEnginePool struct {
 	pool chan Engine
-	typ  Type
+
+	// factory creates a fully-initialized Engine instance. It is invoked both
+	// for eager pre-allocation and for lazy growth. Always non-nil.
+	factory EngineFactoryFunc
+
+	// typ is retained only for diagnostics (e.g. closed-pool error messages);
+	// instance creation goes exclusively through factory.
+	typ Type
 
 	mu     sync.Mutex
 	total  int // number of Engine instances currently alive
@@ -22,44 +43,41 @@ type AutoGrowEnginePool struct {
 	closed bool
 }
 
-// NewAutoGrowEnginePool creates a pool that can grow on demand.
+// NewAutoGrowEnginePoolWithFactory creates a pool that grows on demand, where
+// every Engine instance is produced by factory. factory controls construction,
+// any pre-Init configuration (e.g. SetOpenLibs sandbox, RegisterGlobal), and
+// Init itself; the returned Engine MUST be ready to use.
+//
 //   - initialSize: number of Engines to create eagerly (>= 0)
 //   - maxSize: upper bound on instance count (must be >= initialSize and >= 1)
-//   - typ: selects the registered factory used to build each Engine
-func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEnginePool, error) {
+//   - factory: produces fully-initialized Engines; must not be nil
+func NewAutoGrowEnginePoolWithFactory(initialSize, maxSize int, factory EngineFactoryFunc) (*AutoGrowEnginePool, error) {
 	if maxSize < 1 || initialSize < 0 || initialSize > maxSize {
 		return nil, fmt.Errorf("invalid sizes: initial=%d max=%d", initialSize, maxSize)
 	}
-	if typ == "" {
-		return nil, errors.New("engine type cannot be empty")
+	if factory == nil {
+		return nil, errors.New("script engine: factory cannot be nil")
 	}
 
 	p := &AutoGrowEnginePool{
-		pool:  make(chan Engine, maxSize), // channel capacity equals the cap
-		typ:   typ,
-		total: 0,
-		max:   maxSize,
+		pool:    make(chan Engine, maxSize), // channel capacity equals the cap
+		factory: factory,
+		total:   0,
+		max:     maxSize,
 	}
+
+	ctx := context.Background()
 
 	// Build the initial set of Engines; on any failure clean them all up.
 	created := make([]Engine, 0, initialSize)
 	for i := 0; i < initialSize; i++ {
-		eng, err := NewScriptEngine(typ)
+		eng, err := p.factory(ctx)
 		if err != nil {
 			for _, e := range created {
 				_ = e.Close()
 			}
 			return nil, fmt.Errorf("script engine: factory failed: %w", err)
 		}
-
-		if initErr := eng.Init(context.Background()); initErr != nil {
-			_ = eng.Close()
-			for _, e := range created {
-				_ = e.Close()
-			}
-			return nil, fmt.Errorf("script engine: init failed: %w", initErr)
-		}
-
 		created = append(created, eng)
 	}
 
@@ -70,6 +88,42 @@ func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEngineP
 	}
 	p.total = len(created)
 
+	return p, nil
+}
+
+// NewAutoGrowEnginePool creates a pool that can grow on demand, using the
+// factory registered for typ to build each Engine (and performing Init
+// internally). It is a convenience wrapper around
+// [NewAutoGrowEnginePoolWithFactory] for the common case where no per-instance
+// pre-Init configuration is needed.
+//
+//   - initialSize: number of Engines to create eagerly (>= 0)
+//   - maxSize: upper bound on instance count (must be >= initialSize and >= 1)
+//   - typ: selects the registered factory used to build each Engine
+func NewAutoGrowEnginePool(initialSize, maxSize int, typ Type) (*AutoGrowEnginePool, error) {
+	if typ == "" {
+		// Preserve the historical explicit check so the error reads the same.
+		return nil, errors.New("engine type cannot be empty")
+	}
+	// The type may legitimately not be registered yet; surface that as a
+	// factory failure (consistent with the original behavior) rather than here.
+	factory := func(ctx context.Context) (Engine, error) {
+		eng, err := NewScriptEngine(typ)
+		if err != nil {
+			return nil, err
+		}
+		if initErr := eng.Init(ctx); initErr != nil {
+			_ = eng.Close()
+			return nil, initErr
+		}
+		return eng, nil
+	}
+
+	p, err := NewAutoGrowEnginePoolWithFactory(initialSize, maxSize, factory)
+	if err != nil {
+		return nil, err
+	}
+	p.typ = typ
 	return p, nil
 }
 
@@ -97,7 +151,7 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 	if p.total < p.max {
 		p.total++
 		p.mu.Unlock()
-		eng, err := NewScriptEngine(p.typ)
+		eng, err := p.factory(context.Background())
 		if err != nil {
 			// Creation failed; roll back the counter.
 			p.mu.Lock()
@@ -105,16 +159,6 @@ func (p *AutoGrowEnginePool) Acquire() (Engine, error) {
 			p.mu.Unlock()
 			return nil, err
 		}
-
-		// Initialize the freshly created engine.
-		if initErr := eng.Init(context.Background()); initErr != nil {
-			_ = eng.Close()
-			p.mu.Lock()
-			p.total--
-			p.mu.Unlock()
-			return nil, initErr
-		}
-
 		return eng, nil
 	}
 	// Cap reached; must wait for a released instance.
