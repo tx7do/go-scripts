@@ -226,6 +226,17 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 			return
 		}
 
+		// Bind ctx to the LState for instruction-level cancellation; see
+		// CallFunction for the rationale. Without it, a runaway script would
+		// keep running after ctx is cancelled, holding e.mu and deadlocking
+		// Close().
+		runCtx, cancel := context.WithCancel(ctx)
+		e.vm.L.SetContext(runCtx)
+		defer func() {
+			cancel()
+			e.vm.L.RemoveContext()
+		}()
+
 		done <- e.vm.Execute()
 	}()
 
@@ -300,6 +311,17 @@ func (e *engine) ExecuteString(ctx context.Context, _ string, source string) (an
 			done <- ErrLuaEngineNotInitialized
 			return
 		}
+
+		// Bind ctx to the LState for instruction-level cancellation; see
+		// CallFunction for the rationale. Without it, a runaway script would
+		// keep running after ctx is cancelled, holding e.mu and deadlocking
+		// Close().
+		runCtx, cancel := context.WithCancel(ctx)
+		e.vm.L.SetContext(runCtx)
+		defer func() {
+			cancel()
+			e.vm.L.RemoveContext()
+		}()
 
 		done <- e.vm.ExecuteString(source)
 	}()
@@ -400,6 +422,18 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 			done <- result{nil, ErrLuaEngineNotInitialized}
 			return
 		}
+
+		// Bind ctx to the LState so context cancellation aborts the script at
+		// the next VM instruction (gopher-lua's mainLoopWithContext checks
+		// L.ctx.Done() per instruction). Without this, a runaway script (e.g.
+		// `while true do end`) would keep running after ctx is cancelled,
+		// holding e.mu and deadlocking Close().
+		runCtx, cancel := context.WithCancel(ctx)
+		e.vm.L.SetContext(runCtx)
+		defer func() {
+			cancel()
+			e.vm.L.RemoveContext()
+		}()
 
 		// Convert Go args to LValue.
 		var lArgs []Lua.LValue

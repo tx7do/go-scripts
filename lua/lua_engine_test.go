@@ -716,3 +716,156 @@ func TestLuaEngine_SetOpenLibs_PrivateStateIsolation(t *testing.T) {
 	assert.Nil(t, v, "sandboxed engine must not inherit globals from a prior default engine")
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Instruction-level cancellation (P1: L.SetContext)
+//
+// These guard against the original deadlock bug: a runaway Lua loop held e.mu
+// after ctx cancellation, so Close() blocked forever. With L.SetContext,
+// gopher-lua aborts the script at the next instruction on ctx.Done, releasing
+// the lock.
+////////////////////////////////////////////////////////////////////////////////
+
+// closeWithin invokes eng.Close() in a goroutine and fails the test if it does
+// not return within the given timeout. This is the deadlock detector.
+func closeWithin(t *testing.T, eng *engine, timeout time.Duration) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		_ = eng.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatalf("eng.Close() deadlocked (did not return within %v)", timeout)
+	}
+}
+
+// TestCallFunction_InfiniteLoop_CloseDoesNotDeadlock is THE regression test for
+// P1: a Lua function containing `while true do end` is invoked with a short
+// timeout; the call must return an error, and Close() afterwards must not hang.
+func TestCallFunction_InfiniteLoop_CloseDoesNotDeadlock(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Load a function that spins forever.
+	_, err = eng.ExecuteString(context.Background(), "loop.lua", `
+		function loop_forever()
+			while true do end
+		end
+	`)
+	require.NoError(t, err)
+
+	// Call it with a short timeout; expect a cancellation error.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, callErr := eng.CallFunction(ctx, "loop_forever")
+	elapsed := time.Since(start)
+
+	require.Error(t, callErr, "CallFunction on an infinite loop should return an error on ctx cancel")
+	// It must return promptly (well under the timeout + slack), not block.
+	assert.Less(t, elapsed, 2*time.Second, "CallFunction should return shortly after ctx cancel")
+
+	// THE critical assertion: Close() must NOT deadlock. Before P1, the runaway
+	// goroutine held e.mu forever and this blocked indefinitely.
+	closeWithin(t, eng, 3*time.Second)
+}
+
+// TestExecuteString_InfiniteLoop_CloseDoesNotDeadlock mirrors the above for the
+// ExecuteString entry point (inline infinite loop, no named function).
+func TestExecuteString_InfiniteLoop_CloseDoesNotDeadlock(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+
+	require.NoError(t, eng.Init(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, callErr := eng.ExecuteString(ctx, "loop.lua", "while true do end")
+	require.Error(t, callErr, "ExecuteString on an infinite loop should return an error on ctx cancel")
+
+	closeWithin(t, eng, 3*time.Second)
+}
+
+// TestExecute_InfiniteLoop_CloseDoesNotDeadlock mirrors the above for the
+// Execute entry point (script pre-loaded via LoadString, then run).
+func TestExecute_InfiniteLoop_CloseDoesNotDeadlock(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+
+	require.NoError(t, eng.Init(context.Background()))
+	require.NoError(t, eng.LoadString(context.Background(), "loop.lua", "while true do end"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, callErr := eng.Execute(ctx)
+	require.Error(t, callErr, "Execute on an infinite loop should return an error on ctx cancel")
+
+	closeWithin(t, eng, 3*time.Second)
+}
+
+// TestCallFunction_ManualCancel verifies that explicit (non-timeout) context
+// cancellation also aborts the running script promptly.
+func TestCallFunction_ManualCancel(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	require.NoError(t, eng.Init(context.Background()))
+	_, err = eng.ExecuteString(context.Background(), "loop.lua", `
+		function slow()
+			while true do end
+		end
+	`)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, callErr := eng.CallFunction(ctx, "slow")
+	elapsed := time.Since(start)
+	require.Error(t, callErr)
+	assert.Less(t, elapsed, 2*time.Second, "CallFunction should abort shortly after manual cancel")
+}
+
+// TestCallFunction_EngineReusableAfterAbort verifies the engine is left in a
+// consistent state after an aborted run: a subsequent normal call succeeds and
+// returns the right value. (A leaked/broken LState stack would surface here.)
+func TestCallFunction_EngineReusableAfterAbort(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	require.NoError(t, eng.Init(context.Background()))
+	_, err = eng.ExecuteString(context.Background(), "fns.lua", `
+		function add(a, b) return a + b end
+		function spin() while true do end end
+	`)
+	require.NoError(t, err)
+
+	// Normal call works.
+	r, err := eng.CallFunction(context.Background(), "add", 1, 2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), r)
+
+	// Abort a runaway call.
+	spinCtx, spinCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	_, spinErr := eng.CallFunction(spinCtx, "spin")
+	require.Error(t, spinErr)
+	spinCancel()
+
+	// After the abort, the engine must still work.
+	r, err = eng.CallFunction(context.Background(), "add", 10, 20)
+	require.NoError(t, err, "engine must be reusable after an aborted call")
+	assert.Equal(t, int64(30), r)
+}
+
+
