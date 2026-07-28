@@ -150,6 +150,30 @@ type ScriptWatcher interface {
 	StopWatch(key string) error
 }
 
+// SandboxConfigurator is an OPTIONAL capability that restricts the standard
+// libraries a script can use. It is implemented by engines whose runtime has a
+// notion of selectable standard libraries (e.g. Lua); engines without that
+// concept (CEL, Expr, Starlark, ...) do NOT implement it. Detect support with
+// AsSandboxConfigurator and gracefully degrade when nil.
+//
+// It configures an allow-list of standard libraries that the engine opens for
+// the script runtime; libraries not listed are NOT opened (and, where the
+// engine recycles states from a pool, are actively removed), preventing scripts
+// from escaping the host through libraries such as os / io / debug / etc.
+//
+// SetOpenLibs MUST be called before [ScriptEngine.Init]; the engine consumes
+// the allow-list when it creates the runtime inside Init. Calling it with no
+// arguments reverts to the engine's default of opening the full standard set.
+//
+// The accepted `libs` names are engine-specific (e.g. for Lua they mirror the
+// gopher-lua namespaces: "base", "package", "table", "string", "math", "io",
+// "os", "debug", "channel", "coroutine").
+type SandboxConfigurator interface {
+	// SetOpenLibs configures the allow-list of standard libraries to open.
+	// Must be called before Init.
+	SetOpenLibs(libs ...string)
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 // Aggregate Interface — full-featured engines implement this.
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -221,6 +245,15 @@ func AsModuleRegistrar(e any) ModuleRegistrar {
 func AsWatcher(e any) ScriptWatcher {
 	if w, ok := e.(ScriptWatcher); ok {
 		return w
+	}
+	return nil
+}
+
+// AsSandboxConfigurator returns the SandboxConfigurator capability of e, or nil
+// if unsupported.
+func AsSandboxConfigurator(e any) SandboxConfigurator {
+	if s, ok := e.(SandboxConfigurator); ok {
+		return s
 	}
 	return nil
 }

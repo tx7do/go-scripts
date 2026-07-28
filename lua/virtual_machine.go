@@ -8,7 +8,8 @@ import (
 	scriptEngine "github.com/tx7do/go-scripts"
 
 	"github.com/tengattack/gluacrypto"
-	libs "github.com/vadv/gopher-lua-libs"
+	luahttp "github.com/vadv/gopher-lua-libs/http/client"
+	luajson "github.com/vadv/gopher-lua-libs/json"
 	"github.com/yuin/gluamapper"
 	Lua "github.com/yuin/gopher-lua"
 	luar "layeh.com/gopher-luar"
@@ -110,7 +111,16 @@ func (e *virtualMachine) initBuiltinLibs() {
 		e.openAllowedLibs()
 	}
 
-	libs.Preload(e.L)
+	// Preload ONLY the gopher-lua-libs modules actually used (json, http client,
+	// crypto) instead of the aggregate libs.Preload(). The latter pulls in the
+	// whole ecosystem — most notably http/server, which transitively imports
+	// aws/cloudwatch, db, telegram, prometheus, chef, zabbix, ... and drags in
+	// aws-sdk-go and (via db) the CGO go-sqlite3. These extensions register via
+	// require/package.preload and only need the package loaders, so they are
+	// registered regardless of the sandbox whitelist; a script still needs
+	// require/package enabled to actually load them.
+	luajson.Preload(e.L)
+	luahttp.Preload(e.L)
 
 	gluacrypto.Preload(e.L)
 

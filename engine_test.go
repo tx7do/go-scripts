@@ -59,16 +59,14 @@ func TestAsSandboxConfigurator_FromFullEngine(t *testing.T) {
 	assert.Equal(t, []string{"base", "string"}, eng.openLibs)
 }
 
-// TestEngine_AggregatesSandboxConfigurator guards the contract that the Engine
-// aggregate interface embeds SandboxConfigurator: a type implementing the rest
-// of Engine but missing SetOpenLibs must NOT satisfy Engine.
-func TestEngine_AggregatesSandboxConfigurator(t *testing.T) {
-	// mockEngine implements SetOpenLibs (see manager_test.go), so it must
-	// satisfy the full Engine interface.
-	var _ Engine = (*mockEngine)(nil)
-
-	// A type missing ONLY SetOpenLibs must not satisfy Engine. This is a
-	// compile-time intent check expressed at runtime via a negative assertion.
+// TestSandboxConfigurator_IsStandaloneCapability guards the contract that
+// SandboxConfigurator is an OPTIONAL, standalone capability — NOT embedded in
+// the Engine aggregate interface. Engines without a standard-library concept
+// (CEL, Expr, Starlark, ...) satisfy Engine without implementing SetOpenLibs,
+// and AsSandboxConfigurator returns nil for them.
+func TestSandboxConfigurator_IsStandaloneCapability(t *testing.T) {
+	// An Engine implementation that does NOT implement SetOpenLibs must STILL
+	// satisfy the Engine aggregate interface (sandbox is optional).
 	noSandbox := struct {
 		ScriptEngine
 		ScriptLoader
@@ -78,13 +76,16 @@ func TestEngine_AggregatesSandboxConfigurator(t *testing.T) {
 		ModuleRegistrar
 		ScriptWatcher
 	}{}
-	// It does implement the other capabilities...
+	var _ Engine = noSandbox // compiles only if Engine does NOT require SetOpenLibs
+
+	// It implements ScriptWatcher (one of the embedded capabilities)...
 	var _ ScriptWatcher = noSandbox
-	// ...but NOT the aggregate, because SandboxConfigurator is missing.
-	assert.Nil(t, AsSandboxConfigurator(noSandbox))
-	// Sanity: the Engine interface variable can only accept values that
-	// implement SandboxConfigurator; this line would fail to compile if
-	// SandboxConfigurator were ever dropped from Engine, since noSandbox lacks
-	// SetOpenLibs. We keep it as a live compile guard.
-	var _ Engine = (*mockEngine)(nil)
+	// ...but NOT the sandbox capability.
+	assert.Nil(t, AsSandboxConfigurator(noSandbox),
+		"engine without SetOpenLibs must not be a SandboxConfigurator")
+
+	// mockEngine DOES implement SetOpenLibs (see manager_test.go), so it is a
+	// SandboxConfigurator in addition to being an Engine.
+	eng := newMockEngine("mock")
+	require.NotNil(t, AsSandboxConfigurator(eng))
 }
