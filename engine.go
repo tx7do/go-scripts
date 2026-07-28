@@ -149,6 +149,24 @@ type ScriptWatcher interface {
 	StopWatch(key string) error
 }
 
+// SandboxConfigurator restricts the standard libraries a script can use.
+//
+// It configures an allow-list of standard libraries that the engine opens for
+// the script runtime; libraries not listed are NOT opened, preventing scripts
+// from escaping the host through libraries such as os / io / debug / etc.
+//
+// SetOpenLibs MUST be called before [ScriptEngine.Init]; calling it afterwards
+// is a no-op and reports the last error, since libraries are opened during
+// initialization. When called with no arguments the engine reverts to its
+// default behavior of opening the full standard-library set.
+type SandboxConfigurator interface {
+	// SetOpenLibs configures the allow-list of standard libraries to open.
+	// The accepted `libs` names are engine-specific (e.g. for Lua: "base",
+	// "package", "table", "string", "math", "io", "os", "debug", "channel",
+	// "coroutine"). Must be called before Init.
+	SetOpenLibs(libs ...string)
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////
 // Aggregate Interface — full-featured engines implement this.
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -170,6 +188,7 @@ type Engine interface {
 	FunctionRegistrar
 	ModuleRegistrar
 	ScriptWatcher
+	SandboxConfigurator
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -220,6 +239,15 @@ func AsModuleRegistrar(e any) ModuleRegistrar {
 func AsWatcher(e any) ScriptWatcher {
 	if w, ok := e.(ScriptWatcher); ok {
 		return w
+	}
+	return nil
+}
+
+// AsSandboxConfigurator returns the SandboxConfigurator capability of e, or nil
+// if unsupported.
+func AsSandboxConfigurator(e any) SandboxConfigurator {
+	if s, ok := e.(SandboxConfigurator); ok {
+		return s
 	}
 	return nil
 }

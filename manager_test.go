@@ -25,6 +25,7 @@ type mockEngine struct {
 
 	// Captured observations.
 	source     source.Reader
+	openLibs   []string
 	lastKey    string
 	lastCode   string
 	loaded     int
@@ -53,6 +54,14 @@ func newMockEngine(typ Type) *mockEngine {
 }
 
 func (m *mockEngine) GetType() Type { return m.typ }
+
+// SetOpenLibs satisfies the SandboxConfigurator capability; it records the
+// allow-list so tests can assert what was requested.
+func (m *mockEngine) SetOpenLibs(libs ...string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.openLibs = libs
+}
 
 func (m *mockEngine) Init(_ context.Context) error {
 	m.mu.Lock()

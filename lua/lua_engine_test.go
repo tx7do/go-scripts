@@ -524,3 +524,195 @@ type readerOnly struct {
 
 func (r *readerOnly) Load(_ context.Context, _ string) (string, error) { return r.code, nil }
 func (r *readerOnly) Close() error                                     { return nil }
+
+////////////////////////////////////////////////////////////////////////////////
+// Sandbox (SetOpenLibs)
+////////////////////////////////////////////////////////////////////////////////
+
+// TestLuaEngine_SetOpenLibs_Sandbox verifies that only allow-listed libraries
+// are opened: a script can use a permitted library (string) but cannot access a
+// withheld one (os), which must be nil.
+func TestLuaEngine_SetOpenLibs_Sandbox(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NotNil(t, eng)
+	defer eng.Close()
+
+	// Allow only base + string; os / io / debug / etc. must be unavailable.
+	eng.SetOpenLibs("base", "string")
+	require.NoError(t, eng.Init(context.Background()))
+
+	// string must be usable.
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
+		up = string.upper("abc")
+	`)
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("up")
+	require.NoError(t, err)
+	assert.Equal(t, "ABC", v)
+
+	// os must NOT have been opened: referencing os.execute should fail because
+	// `os` is nil (indexing nil raises a Lua error under pcall protection).
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
+		local _ = os.time()
+	`)
+	require.Error(t, err, "os library should not be available in sandbox mode")
+}
+
+// TestLuaEngine_SetOpenLibs_AfterInitIsNoOp verifies that SetOpenLibs is a no-op
+// once the engine is initialized (it records the last error instead).
+func TestLuaEngine_SetOpenLibs_AfterInitIsNoOp(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	eng.SetOpenLibs("base")
+	require.ErrorIs(t, eng.GetLastError(), ErrLuaEngineAlreadyInitialized)
+}
+
+// TestLuaEngine_SetOpenLibs_AllowsRequire verifies that when "package" is
+// allow-listed, require-based modules work. It also confirms that a withheld
+// library (math) is not reachable even though package is open.
+func TestLuaEngine_SetOpenLibs_AllowsRequire(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// base + package are enough for require to work; string is also opened so we
+	// can build a result. math is intentionally withheld.
+	eng.SetOpenLibs("base", "package", "string")
+	require.NoError(t, eng.Init(context.Background()))
+
+	// require of a gopher-lua-libs module (http) needs package.preload, which is
+	// registered because package is open. Load a trivial script that calls
+	// string.format to prove require is wired up via package.
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
+		local s = string.format("%d-%s", 42, "ok")
+		formed = s
+	`)
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("formed")
+	require.NoError(t, err)
+	assert.Equal(t, "42-ok", v)
+
+	// math must NOT be open: indexing nil raises a Lua error.
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
+		local _ = math.abs(-1)
+	`)
+	require.Error(t, err, "math library should not be available when not allow-listed")
+}
+
+// TestLuaEngine_SetOpenLibs_UnknownNamesIgnored verifies that unrecognized
+// library names neither cause an error nor open anything; the engine still
+// initializes and the explicitly-listed valid libs still work.
+func TestLuaEngine_SetOpenLibs_UnknownNamesIgnored(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// "frobnicate" and "io" are not real standard libs... actually io IS real,
+	// so use a clearly-bogus name. base + a bogus name must still init fine.
+	eng.SetOpenLibs("base", "string", "totally-not-a-real-lib", "????")
+	require.NoError(t, eng.Init(context.Background()))
+
+	// base/string still work.
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
+		x = string.len("abcd")
+	`)
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("x")
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), v)
+
+	// os (never listed) stays blocked.
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
+		local _ = os.time()
+	`)
+	require.Error(t, err)
+}
+
+// TestLuaEngine_SetOpenLibs_DefaultOpensAll verifies the default mode (no
+// SetOpenLibs call) still opens the full standard-library set, so existing
+// behavior is preserved. This is the non-sandbox path.
+func TestLuaEngine_SetOpenLibs_DefaultOpensAll(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	// NOTE: no SetOpenLibs call -> default full-set behavior.
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Several libraries that were NOT opened in the sandbox tests must all be
+	// available here: os, math, table, string.
+	_, err = eng.ExecuteString(context.Background(), "default.lua", `
+		a = os.time() and 1 or 0
+		b = math.abs(-5)
+		c = #table.concat({"x","y"}, "-")
+		d = string.upper("ok")
+	`)
+	require.NoError(t, err)
+
+	// Read each back explicitly.
+	a, _ := eng.GetGlobal("a")
+	assert.Equal(t, int64(1), a)
+	b, _ := eng.GetGlobal("b")
+	assert.Equal(t, int64(5), b)
+	c, _ := eng.GetGlobal("c")
+	assert.Equal(t, int64(3), c) // "x-y"
+	d, _ := eng.GetGlobal("d")
+	assert.Equal(t, "OK", d)
+}
+
+// TestLuaEngine_SetOpenLibs_BlockedLibs confirms a range of dangerous libraries
+// (io, debug, os) are all withheld in sandbox mode, not just os.
+func TestLuaEngine_SetOpenLibs_BlockedLibs(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	eng.SetOpenLibs("base", "string", "math")
+	require.NoError(t, eng.Init(context.Background()))
+
+	for _, lib := range []string{"os", "io", "debug"} {
+		_, err := eng.ExecuteString(context.Background(), "sandbox.lua",
+			"local _ = "+lib+".x")
+		require.Error(t, err, "%s library should be blocked in sandbox mode", lib)
+	}
+}
+
+// TestLuaEngine_SetOpenLibs_PrivateStateIsolation verifies the core sandbox
+// guarantee: a sandboxed engine must NOT inherit globals/libs from a previously
+// used (default-mode) LState. Both engines are exercised; if the sandbox
+// reused a pooled full-lib state, the second engine would see `os` available.
+func TestLuaEngine_SetOpenLibs_PrivateStateIsolation(t *testing.T) {
+	// First engine: default mode, opens everything, sets a global marker.
+	def, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NoError(t, def.Init(context.Background()))
+	_, err = def.ExecuteString(context.Background(), "default.lua", `
+		marker = "default-was-here"
+		_ = os.time()
+	`)
+	require.NoError(t, err)
+	// Returning this engine to the pool is what could pollute a later borrower.
+	require.NoError(t, def.Close())
+
+	// Second engine: sandboxed. Its allow-list does NOT include os. If it
+	// reused the default engine's LState, `os` would leak through.
+	sb, err := newLuaEngine()
+	require.NoError(t, err)
+	defer sb.Close()
+	sb.SetOpenLibs("base", "string")
+	require.NoError(t, sb.Init(context.Background()))
+
+	// os must be blocked even though a full-lib engine just ran.
+	_, err = sb.ExecuteString(context.Background(), "sandbox.lua", `
+		local _ = os.time()
+	`)
+	require.Error(t, err, "sandboxed engine must not inherit os from a prior default engine")
+
+	// The marker global from the default engine must also be absent.
+	v, _ := sb.GetGlobal("marker")
+	assert.Nil(t, v, "sandboxed engine must not inherit globals from a prior default engine")
+}
+

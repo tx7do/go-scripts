@@ -27,6 +27,11 @@ type engine struct {
 	mu          sync.RWMutex  // protects vm, initialized and source
 	lastErrorMu sync.Mutex    // protects lastError
 
+	// openLibs is the allow-list of standard libraries to open for the script
+	// runtime. It is set via SetOpenLibs before Init and consumed when the VM is
+	// created. nil/empty means "open the full standard-library set" (default).
+	openLibs []string
+
 	// Hot reload state
 	watchers   map[string]context.CancelFunc // key -> cancel func for the watch goroutine
 	watchersMu sync.Mutex                    // protects watchers
@@ -38,6 +43,26 @@ func newLuaEngine() (*engine, error) {
 		initialized: false,
 		watchers:    make(map[string]context.CancelFunc),
 	}, nil
+}
+
+// SetOpenLibs configures the allow-list of standard libraries the Lua runtime
+// will open for scripts. It must be called before Init; libraries are opened
+// during VM creation inside Init. Calling it after Init is a no-op and records
+// the last error. Pass no arguments to revert to opening the full standard set.
+//
+// Recognized names: "base", "package", "table", "io", "os", "string", "math",
+// "debug", "channel", "coroutine". Unknown names are ignored (they neither open
+// a library nor cause an error). Libraries not in the allow-list are NOT
+// opened, preventing scripts from escaping the host through os/io/debug/etc.
+func (e *engine) SetOpenLibs(libs ...string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.initialized {
+		e.setLastError(ErrLuaEngineAlreadyInitialized)
+		return
+	}
+	e.openLibs = libs
 }
 
 // GetType returns the script engine type.
@@ -55,7 +80,7 @@ func (e *engine) Init(_ context.Context) error {
 		return ErrLuaEngineAlreadyInitialized
 	}
 
-	e.vm = newVirtualMachine()
+	e.vm = newVirtualMachine(e.openLibs)
 	e.initialized = true
 	e.ClearError()
 

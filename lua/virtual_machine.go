@@ -18,17 +18,49 @@ import (
 type TableMap map[string]interface{}
 
 // virtualMachine wraps a Lua LState and the currently-loaded function.
+//
+// ownsState reports whether the VM created its LState itself (sandbox mode). A
+// pooled LState (ownsState == false) is returned to the pool on Destroy and may
+// be reused by other engines; a privately-owned one is closed outright so it
+// can never leak sandboxed-vs-full-lib state across engines.
 type virtualMachine struct {
-	L *Lua.LState
-	F *Lua.LFunction
+	L        *Lua.LState
+	F        *Lua.LFunction
+	ownsState bool
 }
 
-// newVirtualMachine borrows a Lua state from the pool and initializes it.
-func newVirtualMachine() *virtualMachine {
-	exec := &virtualMachine{
-		L: luaPool.Borrow(),
+// newVirtualMachine obtains a Lua state and initializes it.
+//
+// When openLibs is non-empty the VM runs in sandbox mode: it creates its OWN
+// private LState (with SkipOpenLibs so no standard library is opened), then
+// opens only the allow-listed libraries. A private state guarantees the
+// allow-list is authoritative — it cannot be polluted by a previously pooled,
+// full-library state reused by some other engine. The state is closed on
+// Destroy (it is not returned to any pool).
+//
+// When openLibs is empty the VM borrows a state from the shared pool and opens
+// the full standard-library set (the default behavior).
+func newVirtualMachine(openLibs []string) *virtualMachine {
+	var L *Lua.LState
+	ownsState := false
+	if len(openLibs) > 0 {
+		// Sandbox mode: a fresh, library-less state we fully control.
+		L = Lua.NewState(Lua.Options{
+			CallStackSize:       4096,
+			RegistrySize:        4096,
+			SkipOpenLibs:        true,
+			IncludeGoStackTrace: true,
+		})
+		ownsState = true
+	} else {
+		// Default mode: reuse a pooled state for performance.
+		L = luaPool.Borrow()
 	}
-	exec.init()
+	exec := &virtualMachine{
+		L:         L,
+		ownsState: ownsState,
+	}
+	exec.init(openLibs)
 	return exec
 }
 
@@ -40,13 +72,25 @@ func GetRunPath() string {
 
 // init opens the standard Lua libs and preloads extras (gopher-lua-libs,
 // gluacrypto, ...) and registers a GetLuaPath helper.
-func (e *virtualMachine) init() {
+//
+// When openLibs is non-empty, only the listed standard libraries are opened
+// (sandbox mode); libraries not listed — e.g. os / io / debug — are NOT opened,
+// preventing scripts from escaping the host. An empty/nil openLibs opens the
+// full standard-library set via OpenLibs().
+func (e *virtualMachine) init(openLibs []string) {
 
-	e.L.OpenLibs()
+	packageOpened := e.openLuaStandardLibs(openLibs)
 
-	libs.Preload(e.L)
-
-	gluacrypto.Preload(e.L)
+	// gopher-lua-libs / gluacrypto register their modules through
+	// package.preload (L.PreloadModule), which requires the `package` standard
+	// library to be open — without it, PreloadModule indexes nil and panics. In
+	// sandbox mode without `package` allow-listed we skip these preloads: a
+	// script without `require` cannot reach them anyway. When `package` IS open
+	// (the default, or explicitly allow-listed) the extras preload as usual.
+	if packageOpened {
+		libs.Preload(e.L)
+		gluacrypto.Preload(e.L)
+	}
 
 	//lua_debugger.Preload(e.L)
 
@@ -57,9 +101,71 @@ func (e *virtualMachine) init() {
 	})
 }
 
-// Destroy returns the borrowed Lua state to the pool.
+// openLuaStandardLibs opens the standard Lua libraries. When allowList is empty
+// it opens the full set; otherwise only the named libraries are opened. It
+// returns whether the `package` library was opened (callers use this to decide
+// whether module preloads — which rely on package.preload — are safe).
+func (e *virtualMachine) openLuaStandardLibs(allowList []string) bool {
+	if len(allowList) == 0 {
+		e.L.OpenLibs()
+		return true // OpenLibs always opens package.
+	}
+
+	// Build the set of allow-listed names for O(1) lookup; unknown names are
+	// ignored (they neither open a library nor cause an error).
+	allowed := make(map[string]bool, len(allowList))
+	for _, name := range allowList {
+		allowed[name] = true
+	}
+
+	// package and base must load before the others; iterate stdLibOpeners in
+	// its declaration order so the relative ordering is preserved and only the
+	// allow-listed ones run.
+	packageOpened := false
+	for _, l := range stdLibOpeners {
+		if allowed[l.name] {
+			if l.name == Lua.LoadLibName {
+				packageOpened = true
+			}
+			e.L.Push(e.L.NewFunction(l.opener))
+			e.L.Push(Lua.LString(l.name))
+			e.L.Call(1, 0)
+		}
+	}
+	return packageOpened
+}
+
+// stdLibOpener pairs a standard-library name with its gopher-lua opener.
+type stdLibOpener struct {
+	name   string
+	opener Lua.LGFunction
+}
+
+// stdLibOpeners is the full set of gopher-lua standard libraries, in the order
+// gopher-lua's OpenLibs opens them (package and base first). Used both to open
+// the full set and to drive the allow-list.
+var stdLibOpeners = []stdLibOpener{
+	{name: Lua.LoadLibName, opener: Lua.OpenPackage},
+	{name: Lua.BaseLibName, opener: Lua.OpenBase},
+	{name: Lua.TabLibName, opener: Lua.OpenTable},
+	{name: Lua.IoLibName, opener: Lua.OpenIo},
+	{name: Lua.OsLibName, opener: Lua.OpenOs},
+	{name: Lua.StringLibName, opener: Lua.OpenString},
+	{name: Lua.MathLibName, opener: Lua.OpenMath},
+	{name: Lua.DebugLibName, opener: Lua.OpenDebug},
+	{name: Lua.ChannelLibName, opener: Lua.OpenChannel},
+	{name: Lua.CoroutineLibName, opener: Lua.OpenCoroutine},
+}
+
+// Destroy releases the Lua state. A privately-owned (sandbox) state is Closed
+// outright so it can never be reused; a pooled state is returned to the pool.
 func (e *virtualMachine) Destroy() {
-	if e.L != nil {
+	if e.L == nil {
+		return
+	}
+	if e.ownsState {
+		e.L.Close()
+	} else {
 		luaPool.Return(e.L)
 	}
 }
