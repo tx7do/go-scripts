@@ -11,6 +11,7 @@ git tag starlark/v0.0.3 --force
 git tag tcl/v0.0.3 --force
 
 git tag source/consul/v0.0.3 --force
+git tag source/database/v0.0.1
 git tag source/etcd/v0.0.3 --force
 git tag source/http/v0.0.3 --force
 git tag source/redis/v0.0.3 --force
