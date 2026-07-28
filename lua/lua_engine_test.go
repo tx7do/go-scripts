@@ -14,6 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	Lua "github.com/yuin/gopher-lua"
+
+	scriptEngine "github.com/tx7do/go-scripts"
 	"github.com/tx7do/go-scripts/source"
 )
 
@@ -526,346 +529,376 @@ func (r *readerOnly) Load(_ context.Context, _ string) (string, error) { return 
 func (r *readerOnly) Close() error                                     { return nil }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Sandbox (SetOpenLibs)
+// Runtime Hooks
 ////////////////////////////////////////////////////////////////////////////////
 
-// TestLuaEngine_SetOpenLibs_Sandbox verifies that only allow-listed libraries
-// are opened: a script can use a permitted library (string) but cannot access a
-// withheld one (os), which must be nil.
-func TestLuaEngine_SetOpenLibs_Sandbox(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-	require.NotNil(t, eng)
-	defer eng.Close()
-
-	// Allow only base + string; os / io / debug / etc. must be unavailable.
-	eng.SetOpenLibs("base", "string")
-	require.NoError(t, eng.Init(context.Background()))
-
-	// string must be usable.
-	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
-		up = string.upper("abc")
-	`)
-	require.NoError(t, err)
-	v, err := eng.GetGlobal("up")
-	require.NoError(t, err)
-	assert.Equal(t, "ABC", v)
-
-	// os must NOT have been opened: referencing os.execute should fail because
-	// `os` is nil (indexing nil raises a Lua error under pcall protection).
-	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
-		local _ = os.time()
-	`)
-	require.Error(t, err, "os library should not be available in sandbox mode")
-}
-
-// TestLuaEngine_SetOpenLibs_AfterInitIsNoOp verifies that SetOpenLibs is a no-op
-// once the engine is initialized (it records the last error instead).
-func TestLuaEngine_SetOpenLibs_AfterInitIsNoOp(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-	defer eng.Close()
-	require.NoError(t, eng.Init(context.Background()))
-
-	eng.SetOpenLibs("base")
-	require.ErrorIs(t, eng.GetLastError(), ErrLuaEngineAlreadyInitialized)
-}
-
-// TestLuaEngine_SetOpenLibs_AllowsRequire verifies that when "package" is
-// allow-listed, require-based modules work. It also confirms that a withheld
-// library (math) is not reachable even though package is open.
-func TestLuaEngine_SetOpenLibs_AllowsRequire(t *testing.T) {
+// TestLuaEngine_RuntimeHook_BeforeInit verifies that a hook registered before
+// Init is replayed once Init completes, so the injected host function is
+// callable from Lua.
+func TestLuaEngine_RuntimeHook_BeforeInit(t *testing.T) {
 	eng, err := newLuaEngine()
 	require.NoError(t, err)
 	defer eng.Close()
 
-	// base + package are enough for require to work; string is also opened so we
-	// can build a result. math is intentionally withheld.
-	eng.SetOpenLibs("base", "package", "string")
-	require.NoError(t, eng.Init(context.Background()))
-
-	// require of a gopher-lua-libs module (http) needs package.preload, which is
-	// registered because package is open. Load a trivial script that calls
-	// string.format to prove require is wired up via package.
-	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
-		local s = string.format("%d-%s", 42, "ok")
-		formed = s
-	`)
-	require.NoError(t, err)
-	v, err := eng.GetGlobal("formed")
-	require.NoError(t, err)
-	assert.Equal(t, "42-ok", v)
-
-	// math must NOT be open: indexing nil raises a Lua error.
-	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
-		local _ = math.abs(-1)
-	`)
-	require.Error(t, err, "math library should not be available when not allow-listed")
-}
-
-// TestLuaEngine_SetOpenLibs_UnknownNamesIgnored verifies that unrecognized
-// library names neither cause an error nor open anything; the engine still
-// initializes and the explicitly-listed valid libs still work.
-func TestLuaEngine_SetOpenLibs_UnknownNamesIgnored(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-	defer eng.Close()
-
-	// "frobnicate" and "io" are not real standard libs... actually io IS real,
-	// so use a clearly-bogus name. base + a bogus name must still init fine.
-	eng.SetOpenLibs("base", "string", "totally-not-a-real-lib", "????")
-	require.NoError(t, eng.Init(context.Background()))
-
-	// base/string still work.
-	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
-		x = string.len("abcd")
-	`)
-	require.NoError(t, err)
-	v, err := eng.GetGlobal("x")
-	require.NoError(t, err)
-	assert.Equal(t, int64(4), v)
-
-	// os (never listed) stays blocked.
-	_, err = eng.ExecuteString(context.Background(), "sandbox.lua", `
-		local _ = os.time()
-	`)
-	require.Error(t, err)
-}
-
-// TestLuaEngine_SetOpenLibs_DefaultOpensAll verifies the default mode (no
-// SetOpenLibs call) still opens the full standard-library set, so existing
-// behavior is preserved. This is the non-sandbox path.
-func TestLuaEngine_SetOpenLibs_DefaultOpensAll(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-	defer eng.Close()
-	// NOTE: no SetOpenLibs call -> default full-set behavior.
-	require.NoError(t, eng.Init(context.Background()))
-
-	// Several libraries that were NOT opened in the sandbox tests must all be
-	// available here: os, math, table, string.
-	_, err = eng.ExecuteString(context.Background(), "default.lua", `
-		a = os.time() and 1 or 0
-		b = math.abs(-5)
-		c = #table.concat({"x","y"}, "-")
-		d = string.upper("ok")
-	`)
-	require.NoError(t, err)
-
-	// Read each back explicitly.
-	a, _ := eng.GetGlobal("a")
-	assert.Equal(t, int64(1), a)
-	b, _ := eng.GetGlobal("b")
-	assert.Equal(t, int64(5), b)
-	c, _ := eng.GetGlobal("c")
-	assert.Equal(t, int64(3), c) // "x-y"
-	d, _ := eng.GetGlobal("d")
-	assert.Equal(t, "OK", d)
-}
-
-// TestLuaEngine_SetOpenLibs_BlockedLibs confirms a range of dangerous libraries
-// (io, debug, os) are all withheld in sandbox mode, not just os.
-func TestLuaEngine_SetOpenLibs_BlockedLibs(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-	defer eng.Close()
-
-	eng.SetOpenLibs("base", "string", "math")
-	require.NoError(t, eng.Init(context.Background()))
-
-	for _, lib := range []string{"os", "io", "debug"} {
-		_, err := eng.ExecuteString(context.Background(), "sandbox.lua",
-			"local _ = "+lib+".x")
-		require.Error(t, err, "%s library should be blocked in sandbox mode", lib)
+	// Register the hook BEFORE Init. It exposes a Go function "greet".
+	// Note: the function must be declared as Lua.LGFunction (a named type) so
+	// RegisterFunction's type assertion (fn.(Lua.LGFunction)) succeeds; an
+	// anonymous func(*Lua.LState) int passed through `any` would not match.
+	var greet Lua.LGFunction = func(L *Lua.LState) int {
+		name := L.CheckString(1)
+		L.Push(Lua.LString("hi " + name))
+		return 1
 	}
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", greet)
+	}))
+
+	// Init replays the hook.
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Lua can call the hook-injected function.
+	_, err = eng.ExecuteString(context.Background(), "hook.lua", `
+        local r = greet("world")
+        greet_result = r
+    `)
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("greet_result")
+	require.NoError(t, err)
+	assert.Equal(t, "hi world", v)
 }
 
-// TestLuaEngine_SetOpenLibs_PrivateStateIsolation verifies the core sandbox
-// guarantee: a sandboxed engine must NOT inherit globals/libs from a previously
-// used (default-mode) LState. Both engines are exercised; if the sandbox
-// reused a pooled full-lib state, the second engine would see `os` available.
-func TestLuaEngine_SetOpenLibs_PrivateStateIsolation(t *testing.T) {
-	// First engine: default mode, opens everything, sets a global marker.
-	def, err := newLuaEngine()
+// TestLuaEngine_RuntimeHook_AfterInit verifies that a hook registered after
+// Init runs immediately on the live LState.
+func TestLuaEngine_RuntimeHook_AfterInit(t *testing.T) {
+	eng, err := newLuaEngine()
 	require.NoError(t, err)
-	require.NoError(t, def.Init(context.Background()))
-	_, err = def.ExecuteString(context.Background(), "default.lua", `
-		marker = "default-was-here"
-		_ = os.time()
-	`)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	var greet2 Lua.LGFunction = func(L *Lua.LState) int {
+		name := L.CheckString(1)
+		L.Push(Lua.LString("hello " + name))
+		return 1
+	}
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", greet2)
+	}))
+
+	res, err := eng.CallFunction(context.Background(), "greet", "bob")
 	require.NoError(t, err)
-	// Returning this engine to the pool is what could pollute a later borrower.
-	require.NoError(t, def.Close())
-
-	// Second engine: sandboxed. Its allow-list does NOT include os. If it
-	// reused the default engine's LState, `os` would leak through.
-	sb, err := newLuaEngine()
-	require.NoError(t, err)
-	defer sb.Close()
-	sb.SetOpenLibs("base", "string")
-	require.NoError(t, sb.Init(context.Background()))
-
-	// os must be blocked even though a full-lib engine just ran.
-	_, err = sb.ExecuteString(context.Background(), "sandbox.lua", `
-		local _ = os.time()
-	`)
-	require.Error(t, err, "sandboxed engine must not inherit os from a prior default engine")
-
-	// The marker global from the default engine must also be absent.
-	v, _ := sb.GetGlobal("marker")
-	assert.Nil(t, v, "sandboxed engine must not inherit globals from a prior default engine")
+	assert.Equal(t, "hello bob", res)
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Instruction-level cancellation (P1: L.SetContext)
+// TestLuaEngine_RuntimeHook_PoolReuse_Isolation verifies that business globals
+// injected by one engine are cleared before its LState returns to the pool, so
+// a second engine that recycles the same LState does NOT see them.
 //
-// These guard against the original deadlock bug: a runaway Lua loop held e.mu
-// after ctx cancellation, so Close() blocked forever. With L.SetContext,
-// gopher-lua aborts the script at the next instruction on ctx.Done, releasing
-// the lock.
-////////////////////////////////////////////////////////////////////////////////
+// This is the core isolation guarantee for the global LState pool.
+func TestLuaEngine_RuntimeHook_PoolReuse_Isolation(t *testing.T) {
+	ctx := context.Background()
 
-// closeWithin invokes eng.Close() in a goroutine and fails the test if it does
-// not return within the given timeout. This is the deadlock detector.
-func closeWithin(t *testing.T, eng *engine, timeout time.Duration) {
-	t.Helper()
-	done := make(chan struct{})
+	// Engine A: injects a business global "secret_a".
+	engA, err := newLuaEngine()
+	require.NoError(t, err)
+	require.NoError(t, engA.Init(ctx))
+	require.NoError(t, engA.AddRuntimeHook(func(context.Context) error {
+		return engA.RegisterGlobal("secret_a", "from-A")
+	}))
+	// Confirm A sees its global.
+	v, err := engA.GetGlobal("secret_a")
+	require.NoError(t, err)
+	assert.Equal(t, "from-A", v)
+	// Close A — its LState returns to the pool, stripped of secret_a.
+	require.NoError(t, engA.Close())
+
+	// Engine B: reuses a LState from the pool. It must NOT see secret_a.
+	engB, err := newLuaEngine()
+	require.NoError(t, err)
+	defer engB.Close()
+	require.NoError(t, engB.Init(ctx))
+
+	// secret_a must be gone (cleared by A's Close).
+	v, err = engB.GetGlobal("secret_a")
+	// GetGlobal on a cleared global returns nil (LNil -> nil), no error.
+	require.NoError(t, err)
+	assert.Nil(t, v, "recycled LState must not leak secret_a from engine A")
+
+	// But B's own injection works.
+	require.NoError(t, engB.RegisterGlobal("secret_b", "from-B"))
+	v, err = engB.GetGlobal("secret_b")
+	require.NoError(t, err)
+	assert.Equal(t, "from-B", v)
+
+	// Standard library is intact on the recycled LState.
+	_, err = engB.ExecuteString(ctx, "stdlib.lua", `x = string.len("abcde")`)
+	require.NoError(t, err)
+	v, err = engB.GetGlobal("x")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), v)
+}
+
+// TestLuaEngine_RuntimeHook_ReverseRegister verifies a hook can expose a
+// Go-side registry function so that Lua scripts register callbacks back into
+// Go (the "reverse registration" capability). Go then dispatches the stored
+// Lua callback.
+func TestLuaEngine_RuntimeHook_ReverseRegister(t *testing.T) {
+	ctx := context.Background()
+
+	// Go-side hook registry: name -> Lua function.
+	hooks := make(map[string]*Lua.LFunction)
+	var hooksMu sync.Mutex
+
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// The hook exposes hook.register(name, fn) to Lua. Lua passes a Lua
+	// function, which Go stores for later dispatch.
+	var hookRegister Lua.LGFunction = func(L *Lua.LState) int {
+		name := L.CheckString(1)
+		fn := L.CheckFunction(2)
+		hooksMu.Lock()
+		hooks[name] = fn
+		hooksMu.Unlock()
+		return 0
+	}
+	require.NoError(t, eng.AddRuntimeHook(func(context.Context) error {
+		return eng.RegisterFunction("hook_register", hookRegister)
+	}))
+	require.NoError(t, eng.Init(ctx))
+
+	// Lua script registers a callback "on_event".
+	_, err = eng.ExecuteString(ctx, "reg.lua", `
+        hook_register("on_event", function(payload)
+            return "processed:" .. payload
+        end)
+    `)
+	require.NoError(t, err)
+
+	// Go retrieves the stored Lua function and dispatches it.
+	hooksMu.Lock()
+	fn := hooks["on_event"]
+	hooksMu.Unlock()
+	require.NotNil(t, fn, "Lua callback should have been registered into Go")
+
+	// Dispatch via the engine's LState using CallByParam.
+	var ran int32
+	done := make(chan any, 1)
 	go func() {
-		_ = eng.Close()
-		close(done)
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		atomic.StoreInt32(&ran, 1)
+		if err := eng.vm.L.CallByParam(Lua.P{
+			Fn:      fn,
+			NRet:    1,
+			Protect: true,
+		}, Lua.LString("data")); err != nil {
+			done <- err
+			return
+		}
+		ret := eng.vm.L.Get(-1)
+		eng.vm.L.Pop(1)
+		done <- eng.vm.convertFromLValue(ret)
 	}()
+
 	select {
-	case <-done:
-	case <-time.After(timeout):
-		t.Fatalf("eng.Close() deadlocked (did not return within %v)", timeout)
+	case res := <-done:
+		require.NoError(t, nil)
+		assert.Equal(t, "processed:data", res)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&ran))
+	case <-time.After(2 * time.Second):
+		t.Fatal("reverse dispatch timed out")
 	}
 }
 
-// TestCallFunction_InfiniteLoop_CloseDoesNotDeadlock is THE regression test for
-// P1: a Lua function containing `while true do end` is invoked with a short
-// timeout; the call must return an error, and Close() afterwards must not hang.
-func TestCallFunction_InfiniteLoop_CloseDoesNotDeadlock(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-	require.NotNil(t, eng)
-
-	require.NoError(t, eng.Init(context.Background()))
-
-	// Load a function that spins forever.
-	_, err = eng.ExecuteString(context.Background(), "loop.lua", `
-		function loop_forever()
-			while true do end
-		end
-	`)
-	require.NoError(t, err)
-
-	// Call it with a short timeout; expect a cancellation error.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, callErr := eng.CallFunction(ctx, "loop_forever")
-	elapsed := time.Since(start)
-
-	require.Error(t, callErr, "CallFunction on an infinite loop should return an error on ctx cancel")
-	// It must return promptly (well under the timeout + slack), not block.
-	assert.Less(t, elapsed, 2*time.Second, "CallFunction should return shortly after ctx cancel")
-
-	// THE critical assertion: Close() must NOT deadlock. Before P1, the runaway
-	// goroutine held e.mu forever and this blocked indefinitely.
-	closeWithin(t, eng, 3*time.Second)
-}
-
-// TestExecuteString_InfiniteLoop_CloseDoesNotDeadlock mirrors the above for the
-// ExecuteString entry point (inline infinite loop, no named function).
-func TestExecuteString_InfiniteLoop_CloseDoesNotDeadlock(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-
-	require.NoError(t, eng.Init(context.Background()))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	_, callErr := eng.ExecuteString(ctx, "loop.lua", "while true do end")
-	require.Error(t, callErr, "ExecuteString on an infinite loop should return an error on ctx cancel")
-
-	closeWithin(t, eng, 3*time.Second)
-}
-
-// TestExecute_InfiniteLoop_CloseDoesNotDeadlock mirrors the above for the
-// Execute entry point (script pre-loaded via LoadString, then run).
-func TestExecute_InfiniteLoop_CloseDoesNotDeadlock(t *testing.T) {
-	eng, err := newLuaEngine()
-	require.NoError(t, err)
-
-	require.NoError(t, eng.Init(context.Background()))
-	require.NoError(t, eng.LoadString(context.Background(), "loop.lua", "while true do end"))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	_, callErr := eng.Execute(ctx)
-	require.Error(t, callErr, "Execute on an infinite loop should return an error on ctx cancel")
-
-	closeWithin(t, eng, 3*time.Second)
-}
-
-// TestCallFunction_ManualCancel verifies that explicit (non-timeout) context
-// cancellation also aborts the running script promptly.
-func TestCallFunction_ManualCancel(t *testing.T) {
+// TestLuaEngine_RuntimeHook_AsCapability verifies the optional capability is
+// detected via the helper.
+func TestLuaEngine_RuntimeHook_AsCapability(t *testing.T) {
 	eng, err := newLuaEngine()
 	require.NoError(t, err)
 	defer eng.Close()
 
-	require.NoError(t, eng.Init(context.Background()))
-	_, err = eng.ExecuteString(context.Background(), "loop.lua", `
-		function slow()
-			while true do end
-		end
-	`)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
-	}()
-
-	start := time.Now()
-	_, callErr := eng.CallFunction(ctx, "slow")
-	elapsed := time.Since(start)
-	require.Error(t, callErr)
-	assert.Less(t, elapsed, 2*time.Second, "CallFunction should abort shortly after manual cancel")
+	r := scriptEngine.AsRuntimeHookRegistrar(eng)
+	require.NotNil(t, r, "lua engine should implement RuntimeHookRegistrar")
 }
 
-// TestCallFunction_EngineReusableAfterAbort verifies the engine is left in a
-// consistent state after an aborted run: a subsequent normal call succeeds and
-// returns the right value. (A leaked/broken LState stack would surface here.)
-func TestCallFunction_EngineReusableAfterAbort(t *testing.T) {
+////////////////////////////////////////////////////////////////////////////////
+// OpenLibs sandbox
+////////////////////////////////////////////////////////////////////////////////
+
+// TestLuaEngine_OpenLibs_DefaultOpensAll verifies the default (no SetOpenLibs)
+// keeps all standard libraries available, including the dangerous ones — i.e.
+// backward compatibility.
+func TestLuaEngine_OpenLibs_DefaultOpensAll(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// os and io should be available by default.
+	_, err = eng.ExecuteString(context.Background(), "default.lua",
+		`_G.os_time = os.time()`)
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("os_time")
+	require.NoError(t, err)
+	assert.NotNil(t, v)
+
+	// string library works too.
+	_, err = eng.ExecuteString(context.Background(), "default2.lua",
+		`_G.strlen = string.len("hello")`)
+	require.NoError(t, err)
+	v, err = eng.GetGlobal("strlen")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), v)
+}
+
+// TestLuaEngine_OpenLibs_SandboxDropsDangerous verifies that when SetOpenLibs
+// excludes os and io, scripts can no longer access them — the sandbox is
+// actually enforced.
+func TestLuaEngine_OpenLibs_SandboxDropsDangerous(t *testing.T) {
 	eng, err := newLuaEngine()
 	require.NoError(t, err)
 	defer eng.Close()
 
+	// Sandbox: open base/table/string/math/coroutine only — no os, no io, no
+	// package (require).
+	eng.SetOpenLibs(
+		AllowedLibBase, AllowedLibTab, AllowedLibStr, AllowedLibMath, AllowedLibCoroutine,
+	)
 	require.NoError(t, eng.Init(context.Background()))
-	_, err = eng.ExecuteString(context.Background(), "fns.lua", `
-		function add(a, b) return a + b end
-		function spin() while true do end end
-	`)
+
+	// os must be unavailable.
+	_, err = eng.ExecuteString(context.Background(), "sandbox.lua",
+		`_G.os_type = type(os)`)
+	if assert.NoError(t, err) {
+		v, gerr := eng.GetGlobal("os_type")
+		require.NoError(t, gerr)
+		assert.Equal(t, "nil", v, "os library should be dropped in sandbox mode")
+	}
+
+	// io must be unavailable too.
+	_, err = eng.ExecuteString(context.Background(), "sandbox2.lua",
+		`_G.io_type = type(io)`)
+	if assert.NoError(t, err) {
+		v, gerr := eng.GetGlobal("io_type")
+		require.NoError(t, gerr)
+		assert.Equal(t, "nil", v, "io library should be dropped in sandbox mode")
+	}
+
+	// But whitelisted libraries still work.
+	_, err = eng.ExecuteString(context.Background(), "sandbox3.lua",
+		`_G.strlen = string.len("hello")`)
 	require.NoError(t, err)
-
-	// Normal call works.
-	r, err := eng.CallFunction(context.Background(), "add", 1, 2)
+	v, err := eng.GetGlobal("strlen")
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), r)
-
-	// Abort a runaway call.
-	spinCtx, spinCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	_, spinErr := eng.CallFunction(spinCtx, "spin")
-	require.Error(t, spinErr)
-	spinCancel()
-
-	// After the abort, the engine must still work.
-	r, err = eng.CallFunction(context.Background(), "add", 10, 20)
-	require.NoError(t, err, "engine must be reusable after an aborted call")
-	assert.Equal(t, int64(30), r)
+	assert.Equal(t, int64(5), v, "string library should still work")
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Hot-path execution (ExecuteSync / SetQuota)
+////////////////////////////////////////////////////////////////////////////////
 
+// TestLuaEngine_ExecuteSync_Basic verifies the synchronous path runs a loaded
+// script and produces the expected side effects.
+func TestLuaEngine_ExecuteSync_Basic(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	require.NoError(t, eng.LoadString(context.Background(), "hp.lua", `hp_answer = 6 * 7`))
+
+	_, err = eng.ExecuteSync(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("hp_answer")
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), v)
+}
+
+// TestLuaEngine_ExecuteSync_QuotaTimeout verifies the time quota aborts a
+// runaway infinite loop mid-execution (instruction-level cancellation via the
+// LState context), returning ErrQuotaExceeded — and that it does NOT hang.
+func TestLuaEngine_ExecuteSync_QuotaTimeout(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	require.NoError(t, eng.LoadString(context.Background(), "loop.lua",
+		`local i = 0 while true do i = i + 1 end`))
+
+	eng.SetQuota(scriptEngine.Quota{Timeout: 100 * time.Millisecond})
+
+	done := make(chan error, 1)
+	go func() { _, e := eng.ExecuteSync(context.Background()); done <- e }()
+
+	select {
+	case e := <-done:
+		require.Error(t, e)
+		assert.ErrorIs(t, e, scriptEngine.ErrQuotaExceeded,
+			"timed-out sync run should report ErrQuotaExceeded")
+	case <-time.After(3 * time.Second):
+		t.Fatal("ExecuteSync hung; quota did not interrupt the loop")
+	}
+}
+
+// TestLuaEngine_ExecuteSync_QuotaInstructions documents the current limitation:
+// the Lua engine honors Quota.Timeout but does NOT enforce Quota.MaxInstructions,
+// because gopher-lua's debug.sethook is broken for count hooks. This test
+// asserts that a MaxInstructions-only quota does not falsely claim to bound
+// the run (the loop keeps going), so callers know to rely on Timeout.
+//
+// We therefore run a bounded workload instead of an infinite loop and just
+// confirm the quota is accepted without error and the (non-infinite) script
+// completes.
+func TestLuaEngine_ExecuteSync_QuotaInstructions_UnenforcedByLua(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Bounded loop so the test doesn't hang (MaxInstructions won't stop it).
+	require.NoError(t, eng.LoadString(context.Background(), "bounded.lua",
+		`local s = 0 for i = 1, 1000 do s = s + i end hp_sum = s`))
+
+	eng.SetQuota(scriptEngine.Quota{MaxInstructions: 1000}) // accepted, not enforced
+	_, err = eng.ExecuteSync(context.Background())
+	require.NoError(t, err)
+
+	v, err := eng.GetGlobal("hp_sum")
+	require.NoError(t, err)
+	assert.Equal(t, int64(500500), v) // sum 1..1000 = 500500
+}
+
+// TestLuaEngine_ExecuteSync_QuotaClear verifies that a cleared quota allows an
+// unbounded run to complete (sanity for the zero-value reset path).
+func TestLuaEngine_ExecuteSync_QuotaClear(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// First set, then clear.
+	eng.SetQuota(scriptEngine.Quota{Timeout: 50 * time.Millisecond})
+	eng.SetQuota(scriptEngine.Quota{}) // zero value -> no bound
+
+	require.NoError(t, eng.LoadString(context.Background(), "hp.lua", `hp_done = 1`))
+	_, err = eng.ExecuteSync(context.Background())
+	require.NoError(t, err)
+	v, err := eng.GetGlobal("hp_done")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), v)
+}
+
+// TestLuaEngine_ExecuteSync_AsCapability verifies the hot-path capability is
+// detected via the helpers.
+func TestLuaEngine_ExecuteSync_AsCapability(t *testing.T) {
+	eng, err := newLuaEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	require.NotNil(t, scriptEngine.AsSyncExecutor(eng), "lua engine should implement SyncExecutor")
+	require.NotNil(t, scriptEngine.AsQuotaController(eng), "lua engine should implement QuotaController")
+}

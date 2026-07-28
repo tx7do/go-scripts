@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -612,4 +613,71 @@ func TestDebugYaegiUseImport(t *testing.T) {
 	// tries to locate source code on disk. The Use() registers binary
 	// symbols, but the import path still needs GoPath resolution.
 	// This is a known yaegi limitation for custom packages.
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Runtime Hooks
+////////////////////////////////////////////////////////////////////////////////
+
+// TestYaegiEngine_RuntimeHook_BeforeInit verifies that a hook registered
+// before Init is replayed once Init completes.
+//
+// Note: yaegi's RegisterFunction registers symbols in the "host" package via
+// interp.Use, but referencing host.* through Eval/import is unreliable in
+// yaegi (it tries to resolve package source on disk — see
+// TestDebugYaegiUseImport). This is a yaegi limitation unrelated to hooks, so
+// we only assert that the hook ran and RegisterFunction succeeded. We verify
+// execution via a sentinel and a script-defined function that the hook sets up.
+func TestYaegiEngine_RuntimeHook_BeforeInit(t *testing.T) {
+	eng, err := newYaegiEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	var ran int32
+	// Register the hook BEFORE Init.
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		atomic.AddInt32(&ran, 1)
+		return eng.RegisterFunction("Greet", func(name string) string {
+			return "hi " + name
+		})
+	}))
+
+	// Init replays the hook.
+	require.NoError(t, eng.Init(context.Background()))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&ran), "hook should have run during Init")
+
+	// A script-defined function still executes normally alongside the hook.
+	_, err = eng.ExecuteString(context.Background(), "test",
+		`func add(a, b int) int { return a + b }`)
+	require.NoError(t, err)
+	res, err := eng.CallFunction(context.Background(), "add", 3, 4)
+	require.NoError(t, err)
+	assert.Equal(t, 7, res)
+}
+
+// TestYaegiEngine_RuntimeHook_AfterInit verifies that a hook registered after
+// Init runs immediately on the live interpreter.
+func TestYaegiEngine_RuntimeHook_AfterInit(t *testing.T) {
+	eng := newTestEngine(t)
+	defer eng.Close()
+
+	var ran int32
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		atomic.AddInt32(&ran, 1)
+		return eng.RegisterFunction("Greet", func(name string) string {
+			return "hello " + name
+		})
+	}))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&ran), "hook should run immediately after Init")
+}
+
+// TestYaegiEngine_RuntimeHook_AsCapability verifies the optional capability
+// is detected via the helper.
+func TestYaegiEngine_RuntimeHook_AsCapability(t *testing.T) {
+	eng, err := newYaegiEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	r := scriptEngine.AsRuntimeHookRegistrar(eng)
+	require.NotNil(t, r, "yaegi engine should implement RuntimeHookRegistrar")
 }

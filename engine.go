@@ -3,6 +3,7 @@ package script_engine
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/tx7do/go-scripts/source"
 )
@@ -149,24 +150,6 @@ type ScriptWatcher interface {
 	StopWatch(key string) error
 }
 
-// SandboxConfigurator restricts the standard libraries a script can use.
-//
-// It configures an allow-list of standard libraries that the engine opens for
-// the script runtime; libraries not listed are NOT opened, preventing scripts
-// from escaping the host through libraries such as os / io / debug / etc.
-//
-// SetOpenLibs MUST be called before [ScriptEngine.Init]; calling it afterwards
-// is a no-op and reports the last error, since libraries are opened during
-// initialization. When called with no arguments the engine reverts to its
-// default behavior of opening the full standard-library set.
-type SandboxConfigurator interface {
-	// SetOpenLibs configures the allow-list of standard libraries to open.
-	// The accepted `libs` names are engine-specific (e.g. for Lua: "base",
-	// "package", "table", "string", "math", "io", "os", "debug", "channel",
-	// "coroutine"). Must be called before Init.
-	SetOpenLibs(libs ...string)
-}
-
 ////////////////////////////////////////////////////////////////////////////////////////////
 // Aggregate Interface — full-featured engines implement this.
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -188,7 +171,6 @@ type Engine interface {
 	FunctionRegistrar
 	ModuleRegistrar
 	ScriptWatcher
-	SandboxConfigurator
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -243,11 +225,139 @@ func AsWatcher(e any) ScriptWatcher {
 	return nil
 }
 
-// AsSandboxConfigurator returns the SandboxConfigurator capability of e, or nil
-// if unsupported.
-func AsSandboxConfigurator(e any) SandboxConfigurator {
-	if s, ok := e.(SandboxConfigurator); ok {
+////////////////////////////////////////////////////////////////////////////////////////////
+// Runtime Initialization Hooks — optional capability for injecting host modules /
+// functions / reverse callbacks (e.g. a Go-side hook.register exposed to scripts)
+// into the runtime/VM after Init and before any Load*/Execute*.
+//
+// Lightweight engines (CEL, Expr, Starlark, Tcl, wazero) typically do NOT
+// implement this; callers should use AsRuntimeHookRegistrar to detect support
+// and gracefully degrade.
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// RuntimeHook is invoked after the engine's runtime/VM is created and ready,
+// before any Load*/Execute*. It lets the caller inject business modules, host
+// functions and reverse callbacks into the runtime.
+//
+// For example, a hook may register a Go function under a name like
+// "hook.register" so that scripts can hand their callbacks back to Go:
+//
+//	lua.AddRuntimeHook(func(ctx context.Context) error {
+//	    lua.RegisterFunction("hook.register", func(L *lua.LState) int {
+//	        name := L.CheckString(1)
+//	        fn   := L.CheckFunction(2)
+//	        // store fn in a Go-side registry for later dispatch
+//	        return 0
+//	    })
+//	    return nil
+//	})
+//
+// Engines that pool and reuse runtimes (e.g. the Lua LState pool) must replay
+// every registered hook on each (re)acquired runtime, clearing any business
+// globals the previous owner injected first, so each engine instance stays
+// isolated.
+type RuntimeHook func(ctx context.Context) error
+
+// RuntimeHookRegistrar is the optional capability interface for engines that
+// accept one or more RuntimeHooks.
+//
+// Engine implementers must guarantee:
+//   - hooks registered before Init run during/after Init, before any
+//     Load*/Execute*;
+//   - hooks registered after Init run immediately on the live runtime;
+//   - when a runtime is pooled and reused across engine instances, the business
+//     globals injected by a previous owner are cleared and the current owner's
+//     hooks replayed on each (re)acquisition, so instances stay isolated.
+type RuntimeHookRegistrar interface {
+	// AddRuntimeHook registers a hook to run on the runtime. Calling it before
+	// Init defers execution until Init completes; calling it after Init runs
+	// the hook immediately on the live runtime.
+	AddRuntimeHook(hook RuntimeHook) error
+}
+
+// AsRuntimeHookRegistrar returns the RuntimeHookRegistrar capability of e, or
+// nil if the engine does not support runtime hooks.
+func AsRuntimeHookRegistrar(e any) RuntimeHookRegistrar {
+	if r, ok := e.(RuntimeHookRegistrar); ok {
+		return r
+	}
+	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////
+// Hot-path Execution — optional capability for high-frequency, low-latency
+// execution (e.g. game main loops, per-entity per-frame script callbacks).
+//
+// The standard Execute/ExecuteString methods spawn a goroutine + channel per
+// call to support ctx-based cancellation, which is fine for occasional runs
+// but too expensive for hot paths (thousands of calls per frame). SyncExecutor
+// runs synchronously with no goroutine/channel allocation. QuotaController
+// bounds execution so a misbehaving script can't hang the host.
+////////////////////////////////////////////////////////////////////////////////////////////
+
+// ErrQuotaExceeded is returned by SyncExecutor/QuotaController when a script
+// exceeds the configured time or instruction budget and is interrupted.
+var ErrQuotaExceeded = errors.New("script engine: execution quota exceeded")
+
+// Quota bounds a single synchronous execution. A zero value means "no bound";
+// set Timeout and/or MaxInstructions to enforce a budget. At least one field
+// should be non-zero for the quota to take effect.
+type Quota struct {
+	// Timeout is the wall-clock budget. When the VM supports instruction-level
+	// cancellation (gopher-lua SetContext, goja Interrupt), the run is aborted
+	// mid-execution once elapsed.
+	Timeout time.Duration
+
+	// MaxInstructions is the instruction-count budget. Currently honored by
+	// engines that expose an instruction counter (Lua via debug.sethook).
+	// Zero means "no instruction limit".
+	MaxInstructions int
+}
+
+// SyncExecutor runs a previously-loaded script synchronously, without spawning
+// a goroutine or allocating a channel — the minimal-overhead path for hot
+// loops (e.g. game per-frame callbacks).
+//
+// The caller's ctx, if it carries a deadline/cancellation, is honored by the
+// underlying VM where supported. For an explicit per-call budget, combine with
+// QuotaController: set the quota first, then ExecuteSync.
+//
+// Unlike Execute, the returned error of a timed-out run is (or wraps)
+// ErrQuotaExceeded rather than ctx.Err().
+type SyncExecutor interface {
+	// ExecuteSync runs the last script loaded via Load/LoadMulti/LoadString
+	// synchronously. Returns ErrQuotaExceeded (wrapped) if a configured quota
+	// was hit.
+	ExecuteSync(ctx context.Context) (any, error)
+}
+
+// QuotaController lets callers set an execution budget applied to subsequent
+// SyncExecutor.ExecuteSync calls. It is the hot-path replacement for the
+// per-call goroutine+ctx pattern: instead of paying that cost every call, set
+// a quota once (or per phase) and run synchronously.
+//
+// Engines implement this by wiring the underlying VM's cancellation primitive
+// (gopher-lua's context-checked main loop, goja's Interrupt) to the budget.
+type QuotaController interface {
+	// SetQuota configures the budget for subsequent ExecuteSync runs. Passing
+	// a zero-value Quota removes any bound.
+	SetQuota(q Quota)
+}
+
+// AsSyncExecutor returns the SyncExecutor capability of e, or nil if
+// unsupported.
+func AsSyncExecutor(e any) SyncExecutor {
+	if s, ok := e.(SyncExecutor); ok {
 		return s
+	}
+	return nil
+}
+
+// AsQuotaController returns the QuotaController capability of e, or nil if
+// unsupported.
+func AsQuotaController(e any) QuotaController {
+	if q, ok := e.(QuotaController); ok {
+		return q
 	}
 	return nil
 }

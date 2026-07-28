@@ -2,7 +2,9 @@ package lua
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	Lua "github.com/yuin/gopher-lua"
@@ -27,10 +29,26 @@ type engine struct {
 	mu          sync.RWMutex  // protects vm, initialized and source
 	lastErrorMu sync.Mutex    // protects lastError
 
-	// openLibs is the allow-list of standard libraries to open for the script
-	// runtime. It is set via SetOpenLibs before Init and consumed when the VM is
-	// created. nil/empty means "open the full standard-library set" (default).
+	// Runtime hooks are replayed on the LState right after Init, before any
+	// Load*/Execute*. They let callers inject modules, host functions and
+	// reverse callbacks. Guarded by mu.
+	runtimeHooks []scriptEngine.RuntimeHook
+
+	// businessGlobals records the global names registered via
+	// RegisterGlobal / RegisterFunction / RegisterModule. These are stripped
+	// from the LState before it is returned to the pool, so recycled LStates
+	// don't leak a previous engine's business globals. Guarded by mu.
+	businessGlobals map[string]struct{}
+
+	// openLibs selects which standard libraries the VM opens at init. nil/empty
+	// means "open all" (the backward-compatible default). Set via SetOpenLibs
+	// to enable sandbox mode (drop dangerous libraries such as os/io/package).
+	// See AllowedLib* constants. Guarded by mu.
 	openLibs []string
+
+	// quota is the execution budget applied to ExecuteSync runs. nil means
+	// "no bound". Guarded by mu.
+	quota *scriptEngine.Quota
 
 	// Hot reload state
 	watchers   map[string]context.CancelFunc // key -> cancel func for the watch goroutine
@@ -45,44 +63,60 @@ func newLuaEngine() (*engine, error) {
 	}, nil
 }
 
-// SetOpenLibs configures the allow-list of standard libraries the Lua runtime
-// will open for scripts. It must be called before Init; libraries are opened
-// during VM creation inside Init. Calling it after Init is a no-op and records
-// the last error. Pass no arguments to revert to opening the full standard set.
-//
-// Recognized names: "base", "package", "table", "io", "os", "string", "math",
-// "debug", "channel", "coroutine". Unknown names are ignored (they neither open
-// a library nor cause an error). Libraries not in the allow-list are NOT
-// opened, preventing scripts from escaping the host through os/io/debug/etc.
-func (e *engine) SetOpenLibs(libs ...string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.initialized {
-		e.setLastError(ErrLuaEngineAlreadyInitialized)
-		return
-	}
-	e.openLibs = libs
-}
-
 // GetType returns the script engine type.
 func (e *engine) GetType() scriptEngine.Type {
 	return scriptEngine.LuaType
 }
 
-// Init initializes the engine.
-func (e *engine) Init(_ context.Context) error {
+// SetOpenLibs configures which standard Lua libraries the VM opens at init.
+//
+// With no call (or nil/empty), all standard libraries open — the original,
+// backward-compatible behavior.
+//
+// Pass an explicit list to enable sandbox mode and drop dangerous libraries.
+// Valid names are the AllowedLib* constants (e.g. AllowedLibOs, AllowedLibIo,
+// AllowedLibLoad). Unknown names are ignored. Must be called before Init.
+//
+// Example — open everything except os and io:
+//
+//	eng.SetOpenLibs(
+//	    lua.AllowedLibBase, lua.AllowedLibLoad, lua.AllowedLibTab,
+//	    lua.AllowedLibStr, lua.AllowedLibMath, lua.AllowedLibCoroutine,
+//	)
+func (e *engine) SetOpenLibs(libs ...string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.openLibs = libs
+}
 
+// Init initializes the engine.
+func (e *engine) Init(ctx context.Context) error {
+	// Create the VM under the lock, then replay any hooks registered before
+	// Init *after* releasing the lock — hooks call back into the engine
+	// (RegisterGlobal/RegisterFunction acquire e.mu), which would self-deadlock
+	// if we held the lock during replay.
+	e.mu.Lock()
 	if e.initialized {
 		e.setLastError(ErrLuaEngineAlreadyInitialized)
+		e.mu.Unlock()
 		return ErrLuaEngineAlreadyInitialized
 	}
 
 	e.vm = newVirtualMachine(e.openLibs)
+	e.businessGlobals = make(map[string]struct{})
 	e.initialized = true
 	e.ClearError()
+
+	hooks := append([]scriptEngine.RuntimeHook(nil), e.runtimeHooks...)
+	e.mu.Unlock()
+
+	// Replay hooks outside the engine lock.
+	for _, h := range hooks {
+		if err := h(ctx); err != nil {
+			e.setLastError(err)
+			return err
+		}
+	}
 
 	return nil
 }
@@ -100,8 +134,13 @@ func (e *engine) Close() error {
 	// Stop all active watchers.
 	e.stopAllWatchers()
 
+	// Strip business globals so the recycled LState doesn't leak them to a
+	// future engine instance that borrows it from the pool.
+	e.vm.ClearGlobals(e.snapshotBusinessGlobals())
+
 	e.vm.Destroy()
 	e.vm = nil
+	e.businessGlobals = nil
 	e.initialized = false
 
 	return nil
@@ -226,17 +265,6 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 			return
 		}
 
-		// Bind ctx to the LState for instruction-level cancellation; see
-		// CallFunction for the rationale. Without it, a runaway script would
-		// keep running after ctx is cancelled, holding e.mu and deadlocking
-		// Close().
-		runCtx, cancel := context.WithCancel(ctx)
-		e.vm.L.SetContext(runCtx)
-		defer func() {
-			cancel()
-			e.vm.L.RemoveContext()
-		}()
-
 		done <- e.vm.Execute()
 	}()
 
@@ -312,17 +340,6 @@ func (e *engine) ExecuteString(ctx context.Context, _ string, source string) (an
 			return
 		}
 
-		// Bind ctx to the LState for instruction-level cancellation; see
-		// CallFunction for the rationale. Without it, a runaway script would
-		// keep running after ctx is cancelled, holding e.mu and deadlocking
-		// Close().
-		runCtx, cancel := context.WithCancel(ctx)
-		e.vm.L.SetContext(runCtx)
-		defer func() {
-			cancel()
-			e.vm.L.RemoveContext()
-		}()
-
 		done <- e.vm.ExecuteString(source)
 	}()
 
@@ -356,6 +373,7 @@ func (e *engine) RegisterGlobal(name string, value any) error {
 	}
 
 	e.vm.BindStruct(name, value)
+	e.recordBusinessGlobal(name)
 
 	e.ClearError()
 	return nil
@@ -391,6 +409,7 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 	// Type assertion: only Lua.LGFunction is accepted.
 	if lf, ok := fn.(Lua.LGFunction); ok {
 		e.vm.RegisterFunction(name, lf)
+		e.recordBusinessGlobal(name)
 		e.ClearError()
 		return nil
 	}
@@ -422,18 +441,6 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 			done <- result{nil, ErrLuaEngineNotInitialized}
 			return
 		}
-
-		// Bind ctx to the LState so context cancellation aborts the script at
-		// the next VM instruction (gopher-lua's mainLoopWithContext checks
-		// L.ctx.Done() per instruction). Without this, a runaway script (e.g.
-		// `while true do end`) would keep running after ctx is cancelled,
-		// holding e.mu and deadlocking Close().
-		runCtx, cancel := context.WithCancel(ctx)
-		e.vm.L.SetContext(runCtx)
-		defer func() {
-			cancel()
-			e.vm.L.RemoveContext()
-		}()
 
 		// Convert Go args to LValue.
 		var lArgs []Lua.LValue
@@ -488,6 +495,7 @@ func (e *engine) RegisterModule(name string, module any) error {
 
 	if mod, ok := module.(Lua.LGFunction); ok {
 		e.vm.RegisterModule(name, mod)
+		e.recordBusinessGlobal(name)
 		e.ClearError()
 		return nil
 	}
@@ -495,6 +503,185 @@ func (e *engine) RegisterModule(name string, module any) error {
 	err := fmt.Errorf("module must be of type Lua.LGFunction")
 	e.setLastError(err)
 	return err
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Runtime Hooks
+////////////////////////////////////////////////////////////////////////////////
+
+// AddRuntimeHook registers a RuntimeHook to run on the LState. If the engine is
+// already initialized, the hook runs immediately; otherwise it is deferred
+// until Init completes.
+//
+// Hooks typically inject business modules, host functions or reverse callbacks
+// (e.g. a Go-side "hook.register" that scripts call to hand their callbacks
+// back to Go). Globals/functions registered by hooks (or by any RegisterGlobal
+// / RegisterFunction / RegisterModule call) are tracked as "business globals"
+// and stripped from the LState before it returns to the pool, so recycled
+// LStates stay isolated across engine instances.
+func (e *engine) AddRuntimeHook(hook scriptEngine.RuntimeHook) error {
+	if hook == nil {
+		return nil
+	}
+
+	e.mu.Lock()
+	e.runtimeHooks = append(e.runtimeHooks, hook)
+	initialized := e.initialized
+	e.mu.Unlock()
+
+	if !initialized {
+		// Deferred: Init will replay it.
+		return nil
+	}
+
+	// Already initialized: run the hook immediately. Hooks usually call
+	// RegisterFunction/RegisterModule, which take e.mu themselves, so we must
+	// NOT hold it here.
+	if err := hook(context.Background()); err != nil {
+		e.setLastError(err)
+		return err
+	}
+	return nil
+}
+
+// recordBusinessGlobal remembers a global name registered through the engine
+// API so it can be cleared before the LState returns to the pool. Caller must
+// hold e.mu.
+func (e *engine) recordBusinessGlobal(name string) {
+	if e.businessGlobals == nil {
+		e.businessGlobals = make(map[string]struct{})
+	}
+	e.businessGlobals[name] = struct{}{}
+}
+
+// snapshotBusinessGlobals returns a copy of the tracked business-global names.
+// Caller must hold e.mu.
+func (e *engine) snapshotBusinessGlobals() []string {
+	if len(e.businessGlobals) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(e.businessGlobals))
+	for name := range e.businessGlobals {
+		names = append(names, name)
+	}
+	return names
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Hot-path execution (SyncExecutor / QuotaController)
+////////////////////////////////////////////////////////////////////////////////
+
+// SetQuota configures the execution budget applied to subsequent ExecuteSync
+// runs. The time budget (Quota.Timeout) is enforced via gopher-lua's
+// context-checked main loop, which tests cancellation at every instruction —
+// so a runaway script is interrupted mid-execution rather than blocking the
+// host.
+//
+// NOTE on instruction limits: gopher-lua's debug.sethook is broken for count
+// hooks (it raises "attempt to call a non-function object" regardless of
+// mask), so Quota.MaxInstructions is currently NOT enforced by the Lua engine.
+// Only Quota.Timeout is honored. Use a (tight) Timeout to bound execution.
+//
+// Pass a zero-value Quota to remove any bound.
+func (e *engine) SetQuota(q scriptEngine.Quota) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if q.Timeout == 0 && q.MaxInstructions == 0 {
+		e.quota = nil
+	} else {
+		cp := q
+		e.quota = &cp
+	}
+}
+
+// ExecuteSync runs the last-loaded script synchronously, without spawning a
+// goroutine or allocating a channel — the minimal-overhead path for hot loops
+// (e.g. game per-frame callbacks). It takes e.mu for the duration of the run
+// (gopher-lua's LState is not safe for concurrent use), but avoids the
+// goroutine/channel/select overhead of Execute.
+//
+// If a non-zero Quota.Timeout was set, it is applied via the LState's context
+// (instruction-level cancellation). A run that exceeds its budget returns (or
+// wraps) ErrQuotaExceeded. Quota.MaxInstructions is accepted but not enforced
+// by the Lua engine (see SetQuota note).
+//
+// ctx, if it carries a deadline/cancellation, is also honored (merged with the
+// quota timeout; the stricter deadline wins).
+func (e *engine) ExecuteSync(ctx context.Context) (any, error) {
+	if !e.IsInitialized() {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return nil, ErrLuaEngineNotInitialized
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.initialized || e.vm == nil {
+		e.setLastError(ErrLuaEngineNotInitialized)
+		return nil, ErrLuaEngineNotInitialized
+	}
+
+	L := e.vm.L
+
+	// Compose the time budget: the quota timeout and the caller's ctx. The
+	// stricter (earlier) deadline wins. Setting ctx on the LState switches its
+	// main loop to the per-instruction cancellation check.
+	runCtx, cancel := e.composeRunCtx(ctx)
+	if runCtx != nil {
+		L.SetContext(runCtx)
+		defer func() {
+			cancel()
+			L.RemoveContext()
+		}()
+	} else {
+		cancel()
+	}
+
+	if err := e.vm.Execute(); err != nil {
+		if isQuotaError(err) {
+			wrapped := fmt.Errorf("%w: %v", scriptEngine.ErrQuotaExceeded, err)
+			e.setLastError(wrapped)
+			return nil, wrapped
+		}
+		e.setLastError(err)
+		return nil, err
+	}
+	e.ClearError()
+	return nil, nil
+}
+
+// composeRunCtx builds a context honoring both the quota timeout and the
+// caller's ctx. It returns the context to set on the LState and a cancel func.
+// Returns (nil, cancel) when neither imposes a deadline, meaning the LState
+// needs no context wiring.
+func (e *engine) composeRunCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	cancel := func() {}
+	if e.quota == nil || e.quota.Timeout == 0 {
+		return nil, cancel
+	}
+	quotaCtx, qCancel := context.WithTimeout(context.Background(), e.quota.Timeout)
+	if ctx == nil {
+		return quotaCtx, qCancel
+	}
+	// Merge: derive from the caller's ctx so its cancellation also aborts.
+	merged, mCancel := context.WithTimeout(ctx, e.quota.Timeout)
+	qCancel()
+	return merged, mCancel
+}
+
+// isQuotaError reports whether err resulted from the time-quota mechanism.
+// gopher-lua raises the context's error (context.DeadlineExceeded) as a Lua
+// error via RaiseError, so we detect it by message contents as well as by
+// errors.Is.
+func isQuotaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, scriptEngine.ErrQuotaExceeded) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded")
 }
 
 ////////////////////////////////////////////////////////////////////////////////

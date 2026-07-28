@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	scriptEngine "github.com/tx7do/go-scripts"
 	"github.com/tx7do/go-scripts/source"
 )
 
@@ -410,7 +411,7 @@ func TestJavascriptEngine_StartWatch_HotReload(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Execute again to verify the reloaded script.
-	eng.ClearPrograms() // clear old programs before execute
+	eng.ClearPrograms()                                     // clear old programs before execute
 	require.NoError(t, eng.Load(context.Background(), "k")) // ensure latest is loaded
 	_, err = eng.Execute(context.Background())
 	require.NoError(t, err)
@@ -500,10 +501,141 @@ func TestJavascriptEngine_Close_StopsWatchers(t *testing.T) {
 	}
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Runtime Hooks
+////////////////////////////////////////////////////////////////////////////////
+
+// TestJavascriptEngine_RuntimeHook_BeforeInit verifies that a hook registered
+// before Init is replayed once Init completes, so the injected host function
+// is available to scripts.
+func TestJavascriptEngine_RuntimeHook_BeforeInit(t *testing.T) {
+	eng, err := newJavascriptEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	// Register the hook BEFORE Init. It exposes a Go function "greet".
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", func(name string) string {
+			return "hi " + name
+		})
+	}))
+
+	// Init replays the hook.
+	require.NoError(t, eng.Init(context.Background()))
+
+	// The script should be able to call the hook-injected function.
+	res, err := eng.ExecuteString(context.Background(), "hook.js", `greet("world")`)
+	require.NoError(t, err)
+	assert.Equal(t, "hi world", res)
+}
+
+// TestJavascriptEngine_RuntimeHook_AfterInit verifies that a hook registered
+// after Init runs immediately on the live runtime.
+func TestJavascriptEngine_RuntimeHook_AfterInit(t *testing.T) {
+	eng, err := newJavascriptEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	// Register the hook AFTER Init. It should run immediately.
+	require.NoError(t, eng.AddRuntimeHook(func(ctx context.Context) error {
+		return eng.RegisterFunction("greet", func(name string) string {
+			return "hello " + name
+		})
+	}))
+
+	res, err := eng.ExecuteString(context.Background(), "hook.js", `greet("bob")`)
+	require.NoError(t, err)
+	assert.Equal(t, "hello bob", res)
+}
+
+// TestJavascriptEngine_RuntimeHook_AsCapability verifies the optional
+// capability is detected via the helper.
+func TestJavascriptEngine_RuntimeHook_AsCapability(t *testing.T) {
+	eng, err := newJavascriptEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	r := scriptEngine.AsRuntimeHookRegistrar(eng)
+	require.NotNil(t, r, "JS engine should implement RuntimeHookRegistrar")
+
+	_ = scriptEngine.AsRuntimeHookRegistrar("not an engine")
+	// Non-engine values must return nil (already asserted by require.NotNil above).
+}
+
 // readerOnly implements source.Reader but NOT source.Watcher.
 type readerOnly struct {
 	code string
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Hot-path execution (ExecuteSync / SetQuota)
+////////////////////////////////////////////////////////////////////////////////
+
+// TestJavascriptEngine_ExecuteSync_Basic verifies the synchronous path runs
+// loaded programs and returns their results.
+func TestJavascriptEngine_ExecuteSync_Basic(t *testing.T) {
+	eng, err := newJavascriptEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	require.NoError(t, eng.LoadString(context.Background(), "hp.js", `6 * 7`))
+
+	res, err := eng.ExecuteSync(context.Background())
+	require.NoError(t, err)
+	results, ok := res.([]any)
+	require.True(t, ok, "ExecuteSync should return []any")
+	require.Len(t, results, 1)
+	assert.Equal(t, int64(42), results[0])
+}
+
+// TestJavascriptEngine_ExecuteSync_QuotaTimeout verifies the time quota aborts
+// a runaway infinite loop via goja's Interrupt, returning ErrQuotaExceeded —
+// and that it does NOT hang.
+func TestJavascriptEngine_ExecuteSync_QuotaTimeout(t *testing.T) {
+	eng, err := newJavascriptEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+	require.NoError(t, eng.Init(context.Background()))
+
+	require.NoError(t, eng.LoadString(context.Background(), "loop.js",
+		`let i = 0; while (true) { i++; }`))
+
+	eng.SetQuota(scriptEngine.Quota{Timeout: 100 * time.Millisecond})
+
+	done := make(chan struct {
+		val any
+		err error
+	}, 1)
+	go func() {
+		v, e := eng.ExecuteSync(context.Background())
+		done <- struct {
+			val any
+			err error
+		}{v, e}
+	}()
+
+	select {
+	case r := <-done:
+		require.Error(t, r.err)
+		assert.ErrorIs(t, r.err, scriptEngine.ErrQuotaExceeded,
+			"timed-out sync run should report ErrQuotaExceeded")
+	case <-time.After(3 * time.Second):
+		t.Fatal("ExecuteSync hung; quota did not interrupt the loop")
+	}
+}
+
+// TestJavascriptEngine_ExecuteSync_AsCapability verifies the hot-path
+// capability is detected via the helpers.
+func TestJavascriptEngine_ExecuteSync_AsCapability(t *testing.T) {
+	eng, err := newJavascriptEngine()
+	require.NoError(t, err)
+	defer eng.Close()
+
+	require.NotNil(t, scriptEngine.AsSyncExecutor(eng), "js engine should implement SyncExecutor")
+	require.NotNil(t, scriptEngine.AsQuotaController(eng), "js engine should implement QuotaController")
+}
+
 func (r *readerOnly) Load(_ context.Context, _ string) (string, error) { return r.code, nil }
-func (r *readerOnly) Close() error                                      { return nil }
+func (r *readerOnly) Close() error                                     { return nil }
