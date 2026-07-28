@@ -8,7 +8,8 @@ import (
 	scriptEngine "github.com/tx7do/go-scripts"
 
 	"github.com/tengattack/gluacrypto"
-	libs "github.com/vadv/gopher-lua-libs"
+	luahttp "github.com/vadv/gopher-lua-libs/http/client"
+	luajson "github.com/vadv/gopher-lua-libs/json"
 	"github.com/yuin/gluamapper"
 	Lua "github.com/yuin/gopher-lua"
 	luar "layeh.com/gopher-luar"
@@ -70,8 +71,8 @@ func GetRunPath() string {
 	return path
 }
 
-// init opens the standard Lua libs and preloads extras (gopher-lua-libs,
-// gluacrypto, ...) and registers a GetLuaPath helper.
+// init opens the standard Lua libs and preloads extras (json, http client,
+// crypto, ...) and registers a GetLuaPath helper.
 //
 // When openLibs is non-empty, only the listed standard libraries are opened
 // (sandbox mode); libraries not listed — e.g. os / io / debug — are NOT opened,
@@ -81,14 +82,22 @@ func (e *virtualMachine) init(openLibs []string) {
 
 	packageOpened := e.openLuaStandardLibs(openLibs)
 
-	// gopher-lua-libs / gluacrypto register their modules through
-	// package.preload (L.PreloadModule), which requires the `package` standard
-	// library to be open — without it, PreloadModule indexes nil and panics. In
-	// sandbox mode without `package` allow-listed we skip these preloads: a
-	// script without `require` cannot reach them anyway. When `package` IS open
-	// (the default, or explicitly allow-listed) the extras preload as usual.
+	// Extra modules register through package.preload (L.PreloadModule), which
+	// requires the `package` standard library to be open — without it,
+	// PreloadModule indexes nil and panics. In sandbox mode without `package`
+	// allow-listed we skip these preloads: a script without `require` cannot
+	// reach them anyway. When `package` IS open (the default, or explicitly
+	// allow-listed) the extras preload as usual.
+	//
+	// NOTE: we preload ONLY the modules actually used (json, http client, crypto)
+	// instead of the aggregate libs.Preload(). The latter drags in the entire
+	// gopher-lua-libs ecosystem — most notably http/server, which transitively
+	// imports aws/cloudwatch, db, telegram, prometheus, chef, zabbix, ... and
+	// pulls in aws-sdk-go and (via db) the CGO go-sqlite3. Preloading just these
+	// three keeps the dependency graph clean and CGO-free.
 	if packageOpened {
-		libs.Preload(e.L)
+		luajson.Preload(e.L)
+		luahttp.Preload(e.L)
 		gluacrypto.Preload(e.L)
 	}
 

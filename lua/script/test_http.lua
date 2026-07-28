@@ -1,4 +1,4 @@
-local http = require("http")
+local http = require("http_client")
 local client = http.client()
 local request = http.request("GET", "https://www.baidu.com")
 local result, err = client:do_request(request)
