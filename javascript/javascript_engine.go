@@ -321,19 +321,50 @@ func (e *engine) ExecuteString(ctx context.Context, name string, code string) (a
 		return nil, err
 	}
 
+	// Cancellation arming. Deadline-carrying contexts (the budgeted-execution
+	// case) are enforced via a local timer that this function stops BEFORE
+	// closing done. Once stopped, timer.C can never fire, so a
+	// scheduler-starved watcher goroutine that wakes only after the run has
+	// completed can observe nothing but done — a late rt.Interrupt against the
+	// shared runtime (goja's interrupt is sticky and would poison the NEXT
+	// execution) is ruled out by construction. Deadline-less contexts keep the
+	// legacy ctx.Done() watcher, which is their only abort vector.
+	deadline, hasDeadline := ctx.Deadline()
+	var timer *time.Timer
+	if hasDeadline {
+		timer = time.NewTimer(time.Until(deadline))
+	}
 	done := make(chan struct{})
-	defer close(done)
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		close(done)
+	}()
 
 	go func() {
-		select {
-		case <-ctx.Done():
-			e.execMu.Lock()
-			rt := e.runtime
-			e.execMu.Unlock()
-			if rt != nil {
-				rt.Interrupt(ctx.Err())
+		var interrupt error
+		if timer != nil {
+			select {
+			case <-timer.C:
+				interrupt = context.DeadlineExceeded
+			case <-done:
 			}
-		case <-done:
+		} else {
+			select {
+			case <-ctx.Done():
+				interrupt = ctx.Err()
+			case <-done:
+			}
+		}
+		if interrupt == nil {
+			return
+		}
+		e.execMu.Lock()
+		rt := e.runtime
+		e.execMu.Unlock()
+		if rt != nil {
+			rt.Interrupt(interrupt)
 		}
 	}()
 
@@ -438,19 +469,50 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 		return nil, ErrJavascriptEngineNotInitialized
 	}
 
+	// Cancellation arming. Deadline-carrying contexts (the budgeted-execution
+	// case) are enforced via a local timer that this function stops BEFORE
+	// closing done. Once stopped, timer.C can never fire, so a
+	// scheduler-starved watcher goroutine that wakes only after the run has
+	// completed can observe nothing but done — a late rt.Interrupt against the
+	// shared runtime (goja's interrupt is sticky and would poison the NEXT
+	// execution) is ruled out by construction. Deadline-less contexts keep the
+	// legacy ctx.Done() watcher, which is their only abort vector.
+	deadline, hasDeadline := ctx.Deadline()
+	var timer *time.Timer
+	if hasDeadline {
+		timer = time.NewTimer(time.Until(deadline))
+	}
 	done := make(chan struct{})
-	defer close(done)
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		close(done)
+	}()
 
 	go func() {
-		select {
-		case <-ctx.Done():
-			e.execMu.Lock()
-			rt := e.runtime
-			e.execMu.Unlock()
-			if rt != nil {
-				rt.Interrupt(ctx.Err())
+		var interrupt error
+		if timer != nil {
+			select {
+			case <-timer.C:
+				interrupt = context.DeadlineExceeded
+			case <-done:
 			}
-		case <-done:
+		} else {
+			select {
+			case <-ctx.Done():
+				interrupt = ctx.Err()
+			case <-done:
+			}
+		}
+		if interrupt == nil {
+			return
+		}
+		e.execMu.Lock()
+		rt := e.runtime
+		e.execMu.Unlock()
+		if rt != nil {
+			rt.Interrupt(interrupt)
 		}
 	}()
 
@@ -730,19 +792,50 @@ func (e *engine) RunProgram(ctx context.Context, program *goja.Program) (any, er
 		return nil, ErrJavascriptEngineNotInitialized
 	}
 
+	// Cancellation arming. Deadline-carrying contexts (the budgeted-execution
+	// case) are enforced via a local timer that this function stops BEFORE
+	// closing done. Once stopped, timer.C can never fire, so a
+	// scheduler-starved watcher goroutine that wakes only after the run has
+	// completed can observe nothing but done — a late rt.Interrupt against the
+	// shared runtime (goja's interrupt is sticky and would poison the NEXT
+	// execution) is ruled out by construction. Deadline-less contexts keep the
+	// legacy ctx.Done() watcher, which is their only abort vector.
+	deadline, hasDeadline := ctx.Deadline()
+	var timer *time.Timer
+	if hasDeadline {
+		timer = time.NewTimer(time.Until(deadline))
+	}
 	done := make(chan struct{})
-	defer close(done)
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		close(done)
+	}()
 
 	go func() {
-		select {
-		case <-ctx.Done():
-			e.execMu.Lock()
-			rt := e.runtime
-			e.execMu.Unlock()
-			if rt != nil {
-				rt.Interrupt(ctx.Err())
+		var interrupt error
+		if timer != nil {
+			select {
+			case <-timer.C:
+				interrupt = context.DeadlineExceeded
+			case <-done:
 			}
-		case <-done:
+		} else {
+			select {
+			case <-ctx.Done():
+				interrupt = ctx.Err()
+			case <-done:
+			}
+		}
+		if interrupt == nil {
+			return
+		}
+		e.execMu.Lock()
+		rt := e.runtime
+		e.execMu.Unlock()
+		if rt != nil {
+			rt.Interrupt(interrupt)
 		}
 	}()
 
