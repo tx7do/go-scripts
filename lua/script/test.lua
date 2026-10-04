@@ -1,4 +1,4 @@
-require(json)
+require("json")
 
 print("Hello from Lua, " .. u.Name .. "!")
 

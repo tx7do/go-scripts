@@ -110,13 +110,6 @@ func TestVirtualMachine_CryptoModule(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-func TestVirtualMachine_Debugger(t *testing.T) {
-	exe := newVirtualMachine(nil)
-	defer exe.Destroy()
-
-	err := exe.LoadFile("./script/test_debugger.lua")
-	assert.Nil(t, err)
-
-	err = exe.Execute()
-	assert.Nil(t, err)
-}
+// NOTE: script/test_debugger.lua is a manual debugging scratch for the
+// emmy_core native module (EmmyLua IDE debugger): it dials localhost:9966,
+// so it must never run in the automated suite — run it by hand when needed.
