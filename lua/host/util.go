@@ -1,0 +1,78 @@
+package host
+
+import (
+	"context"
+	"time"
+
+	bLogger "github.com/tx7do/kratos-bootstrap/logger"
+	lua "github.com/yuin/gopher-lua"
+)
+
+// RegisterUtilAPI registers utility functions for Lua scripts
+// Provides common utilities like sleep, time, etc.
+func RegisterUtilAPI(L *lua.LState, logger *bLogger.Helper) {
+	// Register as requireable module
+	L.PreloadModule("kratos_util", LoaderUtil(logger))
+
+	if logger != nil {
+		logger.Debug(context.Background(), "Registered Lua util API")
+	}
+}
+
+// LoaderUtil 返回 util 模块（kratos_util）的 loader，供 go-scripts 引擎 RegisterModule 使用。
+// maxSleep 为 sleep 时长上限（防御脚本无限阻塞执行线程）；未传时默认 5 秒。
+func LoaderUtil(logger *bLogger.Helper, maxSleep ...time.Duration) lua.LGFunction {
+	cap := 5 * time.Second
+	if len(maxSleep) > 0 && maxSleep[0] > 0 {
+		cap = maxSleep[0]
+	}
+	return func(L *lua.LState) int {
+		// Create util module
+		utilModule := L.NewTable()
+
+		// util.sleep(seconds)
+		// Sleep for the specified number of seconds (can be fractional)
+		utilModule.RawSetString("sleep", L.NewFunction(func(L *lua.LState) int {
+			seconds := L.CheckNumber(1)
+			duration := time.Duration(float64(seconds) * float64(time.Second))
+			if duration > cap {
+				if logger != nil {
+					logger.Warnf(context.Background(), "Lua sleep %v exceeds cap, clamped to %v", duration, cap)
+				}
+				duration = cap
+			}
+
+			if logger != nil {
+				logger.Debugf(context.Background(), "Lua sleep: %v", duration)
+			}
+
+			time.Sleep(duration)
+			return 0
+		}))
+
+		// util.time()
+		// Returns current Unix timestamp
+		utilModule.RawSetString("time", L.NewFunction(func(L *lua.LState) int {
+			L.Push(lua.LNumber(time.Now().Unix()))
+			return 1
+		}))
+
+		// util.timestamp()
+		// Returns current Unix timestamp in milliseconds
+		utilModule.RawSetString("timestamp", L.NewFunction(func(L *lua.LState) int {
+			L.Push(lua.LNumber(time.Now().UnixMilli()))
+			return 1
+		}))
+
+		// util.date(format)
+		// Returns formatted date string (default: RFC3339)
+		utilModule.RawSetString("date", L.NewFunction(func(L *lua.LState) int {
+			format := L.OptString(1, time.RFC3339)
+			L.Push(lua.LString(time.Now().Format(format)))
+			return 1
+		}))
+
+		L.Push(utilModule)
+		return 1
+	}
+}
