@@ -4,6 +4,13 @@
 
 GopherLua 是纯 Go 实现的 Lua 5.1 虚拟机，与 C 风格的 Lua C API 风格接近，性能不错且零 CGO 依赖。
 
+## 包结构
+
+| 包 | 说明 |
+|---|---|
+| [`convert`](convert/README.md) | Lua ↔ Go 深度递归值转换（`ToLuaValue` / `ToGoValue`） |
+| [`host`](host/README.md) | 宿主能力模块桥：`kratos_logger` / `kratos_crypto` / `kratos_util` / `kratos_hook` / `kratos_http` 五个 require 模块 |
+
 ## 设计要点
 
 - **统一接口**：实现 [`script_engine.Engine`](../engine.go) 接口，可与 [`Manager`](../manager.go)、[`EnginePool`](../engine_pool.go)、[`AutoGrowEnginePool`](../engine_pool_autogrow.go) 等根模块组件无缝配合。
@@ -11,7 +18,7 @@ GopherLua 是纯 Go 实现的 Lua 5.1 虚拟机，与 C 风格的 Lua C API 风�
 - **并发安全**：内部用 `sync.RWMutex` 保护 VM / source / initialized；`Execute*` / `CallFunction` 通过 channel + `ctx.Done()` 支持取消和超时。
 - **LState 复用池**：本模块自带 [`statePool`](state_pool.go)，在 engine `Init` 时借出、`Close` 时归还，默认上限 10 个 LState 实例，避免每次脚本运行都重建虚拟机。
 - **脚本源解耦**：通过 `Source` 接口（`FileSource` / `MemSource` / `MultiSource` / 自定义扩展）注入脚本来源，engine 本身不再耦合任何 IO 细节。
-- **标准 Lua 生态**：`Init` 时自动开启 Lua 标准库 + [`gopher-lua-libs`](https://github.com/vadv/gopher-lua-libs)（json / http / regexp / db / time / ...）+ [`gluacrypto`](https://github.com/tengattack/gluacrypto)（加密 / 哈希）+ `GetLuaPath` 辅助函数。
+- **标准 Lua 生态**：`Init` 时开启 Lua 标准库（支持 [`AllowedLib*`](virtual_machine.go) 沙箱白名单按需开启）+ **选择性预载** [`gopher-lua-libs`](https://github.com/vadv/gopher-lua-libs) 的 json / http client 与 [`gluacrypto`](https://github.com/tengattack/gluacrypto)（聚合式 `libs.Preload` 会拖入 aws-sdk 等重依赖，刻意不用）+ `GetLuaPath` 辅助函数；宿主业务模块（`kratos_*`）见 [`host`](host/README.md)。
 
 ## gopher-lua 的几点限制（务必留意）
 

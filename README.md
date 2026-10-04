@@ -212,6 +212,7 @@ go-scripts/
 ├── engine_pool.go                # 固定大小引擎池
 ├── engine_pool_autogrow.go       # 自动扩容引擎池
 ├── types.go                      # 类型常量定义
+├── hook/                         # 钩子点注册表（语言无关，并发安全，upsert 热更新）
 ├── source/                       # 脚本来源模块
 │   ├── source.go                 # Reader / Watcher / ReadWatcher 接口
 │   ├── file.go                   # 本地文件源
@@ -227,6 +228,7 @@ go-scripts/
 │   ├── http/                     # HTTP 远程拉取
 │   ├── git/                      # Git 仓库 (go-git/v6)
 │   └── database/                 # SQL 数据库 (database/sql)
+├── hostmodule/                   # 语言无关宿主模块框架（log/crypto/util/http + 出站护栏）
 ├── lua/                          # Lua 引擎 (gopher-lua)
 ├── javascript/                   # JavaScript 引擎 (goja)
 ├── gpython/                      # Python 引擎 (gpython)
@@ -390,6 +392,13 @@ cd tcl && go test -v ./...
 - [Expr 引擎文档](expr/README.md)
 - [Starlark 引擎文档](starlark/README.md)
 - [TCL 引擎文档](tcl/README.md)
+
+### 宿主基建
+
+- [Hook 注册表文档](hook/README.md)
+- [Host 模块框架文档](hostmodule/README.md)（含 HTTP 出站护栏与 `SCRIPT_HTTP_ALLOWED_DOMAINS` 说明）
+- [Lua 值转换文档](lua/convert/README.md)
+- [Lua 宿主模块桥文档](lua/host/README.md)
 
 ### 脚本来源
 
