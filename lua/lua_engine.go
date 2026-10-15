@@ -243,7 +243,9 @@ func (e *engine) LoadString(_ context.Context, _ string, source string) error {
 ////////////////////////////////////////////////////////////////////////////////
 
 // Execute runs the script previously loaded via Load/LoadMulti/LoadString.
-// Context cancellation aborts the run.
+// Context cancellation interrupts the script mid-run (via the LState context)
+// and the call returns only after the run has actually stopped, so the engine
+// is immediately reusable and no goroutine outlives the call.
 //
 // Note: gopher-lua only keeps a single compiled function at a time, so the
 // returned result reflects the last load.
@@ -265,11 +267,26 @@ func (e *engine) Execute(ctx context.Context) (any, error) {
 			return
 		}
 
+		// Wire the caller's ctx into the VM: this switches gopher-lua to the
+		// context-checked main loop, so cancellation interrupts the script
+		// itself instead of leaving it spinning on e.mu forever. Deadline-less
+		// contexts cannot cancel, so they keep the unchecked (faster) loop.
+		if ctx.Done() != nil {
+			L := e.vm.L
+			L.SetContext(ctx)
+			defer L.RemoveContext()
+		}
+
 		done <- e.vm.Execute()
 	}()
 
 	select {
 	case <-ctx.Done():
+		// Wait for the run goroutine: it owns e.mu and the pooled LState, and
+		// returning now would leak both (the goroutine can even outlive this
+		// engine through the shared state pool). The SetContext above makes
+		// the VM abort on cancellation, so this wait cannot block forever.
+		<-done
 		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
 
@@ -322,7 +339,9 @@ func (e *engine) ExecuteFromKeys(ctx context.Context, keys []string) ([]any, err
 
 // ExecuteString compiles and immediately runs the inline script (name+code),
 // bypassing the bound Source. `name` is accepted for interface compatibility but
-// gopher-lua's DoString does not use a name, so it is ignored.
+// gopher-lua's DoString does not use a name, so it is ignored. Context
+// cancellation interrupts the script mid-run and the call returns only after
+// the run has actually stopped.
 func (e *engine) ExecuteString(ctx context.Context, _ string, source string) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
@@ -340,11 +359,22 @@ func (e *engine) ExecuteString(ctx context.Context, _ string, source string) (an
 			return
 		}
 
+		// See Execute for why the ctx is wired into the VM here.
+		if ctx.Done() != nil {
+			L := e.vm.L
+			L.SetContext(ctx)
+			defer L.RemoveContext()
+		}
+
 		done <- e.vm.ExecuteString(source)
 	}()
 
 	select {
 	case <-ctx.Done():
+		// See Execute: the run goroutine owns e.mu and the pooled LState, and
+		// the SetContext above makes the VM abort on cancellation, so this
+		// wait cannot block forever.
+		<-done
 		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
 
@@ -420,6 +450,8 @@ func (e *engine) RegisterFunction(name string, fn any) error {
 }
 
 // CallFunction calls the named Lua function with args and returns its result.
+// Context cancellation interrupts the call mid-run and the method returns only
+// after the run has actually stopped.
 func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (any, error) {
 	if !e.IsInitialized() {
 		e.setLastError(ErrLuaEngineNotInitialized)
@@ -440,6 +472,13 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 		if !e.initialized {
 			done <- result{nil, ErrLuaEngineNotInitialized}
 			return
+		}
+
+		// See Execute for why the ctx is wired into the VM here.
+		if ctx.Done() != nil {
+			L := e.vm.L
+			L.SetContext(ctx)
+			defer L.RemoveContext()
 		}
 
 		// Convert Go args to LValue.
@@ -469,6 +508,10 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 
 	select {
 	case <-ctx.Done():
+		// See Execute: the run goroutine owns e.mu and the pooled LState, and
+		// the SetContext above makes the VM abort on cancellation, so this
+		// wait cannot block forever.
+		<-done
 		e.setLastError(ctx.Err())
 		return nil, ctx.Err()
 
