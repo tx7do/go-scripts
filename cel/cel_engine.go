@@ -220,19 +220,23 @@ func (e *engine) LoadString(_ context.Context, name string, code string) error {
 	}
 
 	e.execMu.Lock()
-	defer e.execMu.Unlock()
 	if e.env == nil {
+		e.execMu.Unlock()
 		e.setLastError(ErrCLEEnvNotInitialized)
 		return ErrCLEEnvNotInitialized
 	}
 
 	ast, prg, err := e.compileAndProgram(code)
+	e.execMu.Unlock()
 	if err != nil {
 		wrapped := fmt.Errorf("%w: %s: %v", ErrCELCompileFailed, name, err)
 		e.setLastError(wrapped)
 		return wrapped
 	}
 
+	// Append outside execMu: e.mu must never be acquired while holding execMu
+	// (lock order is mu → execMu, see rebuildEnvLocked). Concurrent LoadString
+	// callers have no defined relative order, so appending here is safe.
 	e.mu.Lock()
 	e.programs = append(e.programs, compiledExpr{
 		name: name,
@@ -327,6 +331,14 @@ func (e *engine) ExecuteString(ctx context.Context, name string, code string) (a
 		return nil, ErrCELEngineNotInitialized
 	}
 
+	// Snapshot the variables before taking execMu: e.mu must never be acquired
+	// under execMu — RegisterGlobal & co. hold e.mu while waiting for execMu
+	// inside rebuildEnvLocked, so nesting here deadlocks (lock order: mu →
+	// execMu, like every other engine).
+	e.mu.RLock()
+	vars := e.evalVars()
+	e.mu.RUnlock()
+
 	e.execMu.Lock()
 	defer e.execMu.Unlock()
 	if e.env == nil {
@@ -340,10 +352,6 @@ func (e *engine) ExecuteString(ctx context.Context, name string, code string) (a
 		e.setLastError(wrapped)
 		return nil, wrapped
 	}
-
-	e.mu.RLock()
-	vars := e.evalVars()
-	e.mu.RUnlock()
 
 	result, _, err := prg.Eval(vars)
 	if err != nil {

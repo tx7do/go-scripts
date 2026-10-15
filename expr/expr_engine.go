@@ -186,14 +186,17 @@ func (e *engine) LoadString(_ context.Context, name string, code string) error {
 		return ErrExprEngineNotInitialized
 	}
 
-	e.execMu.Lock()
-	defer e.execMu.Unlock()
-
+	// Snapshot the env before execMu and append after releasing it: e.mu must
+	// never be acquired while holding execMu (lock order: mu → execMu).
+	// Concurrent LoadString callers have no defined relative order, so
+	// appending here is safe.
 	e.mu.RLock()
 	env := e.snapshotEnv()
 	e.mu.RUnlock()
 
+	e.execMu.Lock()
 	program, err := expr.Compile(code, expr.Env(env))
+	e.execMu.Unlock()
 	if err != nil {
 		wrapped := fmt.Errorf("%w: %s: %v", ErrExprCompileFailed, name, err)
 		e.setLastError(wrapped)
@@ -294,12 +297,14 @@ func (e *engine) ExecuteString(ctx context.Context, name string, code string) (a
 		return nil, ErrExprEngineNotInitialized
 	}
 
-	e.execMu.Lock()
-	defer e.execMu.Unlock()
-
+	// Snapshot the env before taking execMu: e.mu must never be acquired while
+	// holding execMu (lock order: mu → execMu).
 	e.mu.RLock()
 	env := e.snapshotEnv()
 	e.mu.RUnlock()
+
+	e.execMu.Lock()
+	defer e.execMu.Unlock()
 
 	program, err := expr.Compile(code, expr.Env(env))
 	if err != nil {
