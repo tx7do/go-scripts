@@ -321,54 +321,12 @@ func (e *engine) ExecuteString(ctx context.Context, name string, code string) (a
 		return nil, err
 	}
 
-	// Cancellation arming. Deadline-carrying contexts (the budgeted-execution
-	// case) are enforced via a local timer that this function stops BEFORE
-	// closing done. Once stopped, timer.C can never fire, so a
-	// scheduler-starved watcher goroutine that wakes only after the run has
-	// completed can observe nothing but done — a late rt.Interrupt against the
-	// shared runtime (goja's interrupt is sticky and would poison the NEXT
-	// execution) is ruled out by construction. Deadline-less contexts keep the
-	// legacy ctx.Done() watcher, which is their only abort vector.
-	deadline, hasDeadline := ctx.Deadline()
-	var timer *time.Timer
-	if hasDeadline {
-		timer = time.NewTimer(time.Until(deadline))
-	}
-	done := make(chan struct{})
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-		close(done)
-	}()
+	// Cancellation arming (see armCancelWatch): deadline-carrying contexts are
+	// enforced via a local timer that finishArm stops before done closes; the
+	// watcher never takes execMu (that would deadlock against the run itself).
+	defer e.armCancelWatch(ctx)()
 
-	go func() {
-		var interrupt error
-		if timer != nil {
-			select {
-			case <-timer.C:
-				interrupt = context.DeadlineExceeded
-			case <-done:
-			}
-		} else {
-			select {
-			case <-ctx.Done():
-				interrupt = ctx.Err()
-			case <-done:
-			}
-		}
-		if interrupt == nil {
-			return
-		}
-		e.execMu.Lock()
-		rt := e.runtime
-		e.execMu.Unlock()
-		if rt != nil {
-			rt.Interrupt(interrupt)
-		}
-	}()
-
-	result, err := e.withRuntime(func(rt *goja.Runtime) (any, error) {
+	result, err := e.withRuntime(ctx, func(rt *goja.Runtime) (any, error) {
 		var retErr error
 		defer func() {
 			if r := recover(); r != nil {
@@ -469,54 +427,12 @@ func (e *engine) CallFunction(ctx context.Context, name string, args ...any) (an
 		return nil, ErrJavascriptEngineNotInitialized
 	}
 
-	// Cancellation arming. Deadline-carrying contexts (the budgeted-execution
-	// case) are enforced via a local timer that this function stops BEFORE
-	// closing done. Once stopped, timer.C can never fire, so a
-	// scheduler-starved watcher goroutine that wakes only after the run has
-	// completed can observe nothing but done — a late rt.Interrupt against the
-	// shared runtime (goja's interrupt is sticky and would poison the NEXT
-	// execution) is ruled out by construction. Deadline-less contexts keep the
-	// legacy ctx.Done() watcher, which is their only abort vector.
-	deadline, hasDeadline := ctx.Deadline()
-	var timer *time.Timer
-	if hasDeadline {
-		timer = time.NewTimer(time.Until(deadline))
-	}
-	done := make(chan struct{})
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-		close(done)
-	}()
+	// Cancellation arming (see armCancelWatch): deadline-carrying contexts are
+	// enforced via a local timer that finishArm stops before done closes; the
+	// watcher never takes execMu (that would deadlock against the run itself).
+	defer e.armCancelWatch(ctx)()
 
-	go func() {
-		var interrupt error
-		if timer != nil {
-			select {
-			case <-timer.C:
-				interrupt = context.DeadlineExceeded
-			case <-done:
-			}
-		} else {
-			select {
-			case <-ctx.Done():
-				interrupt = ctx.Err()
-			case <-done:
-			}
-		}
-		if interrupt == nil {
-			return
-		}
-		e.execMu.Lock()
-		rt := e.runtime
-		e.execMu.Unlock()
-		if rt != nil {
-			rt.Interrupt(interrupt)
-		}
-	}()
-
-	result, err := e.withRuntime(func(rt *goja.Runtime) (any, error) {
+	result, err := e.withRuntime(ctx, func(rt *goja.Runtime) (any, error) {
 		var (
 			res    any
 			retErr error
@@ -680,6 +596,14 @@ func (e *engine) ExecuteSync(ctx context.Context) (any, error) {
 		e.setLastError(ErrJavascriptRuntimeNotInitialized)
 		return nil, ErrJavascriptRuntimeNotInitialized
 	}
+	// Same sticky-interrupt hygiene as withRuntime: a run queued behind execMu
+	// can outlive its budget — fail it instead of executing; a stray interrupt
+	// armed for it is wiped rather than poisoning a future run.
+	if err := ctx.Err(); err != nil {
+		e.setLastError(err)
+		return nil, err
+	}
+	e.runtime.ClearInterrupt()
 
 	// Arm the quota watcher if a timeout is configured. The watcher interrupts
 	// the runtime when the timer fires or the caller's ctx is cancelled. We pass
@@ -775,13 +699,95 @@ func (e *engine) ClearError() {
 	e.lastError = nil
 }
 
-// withRuntime runs fn while holding execMu, providing safe access to the runtime.
-func (e *engine) withRuntime(fn func(rt *goja.Runtime) (any, error)) (any, error) {
+// armCancelWatch arms the cancellation watcher for a run that is about to
+// start. It returns finishArm; the caller must `defer finishArm()` so the
+// watcher is released when the run returns. Deadline-carrying contexts are
+// enforced via a local timer that finishArm stops BEFORE closing done, so once
+// the run has completed the timer can never fire and the watcher can only
+// observe done.
+//
+// The watcher NEVER takes execMu: the run itself holds execMu for its whole
+// duration, so a watcher that needed the lock could never deliver its
+// interrupt and a non-yielding script would deadlock the engine
+// (rt.Interrupt is safe to call concurrently with a running program). Instead
+// the runtime is snapshotted here under execMu. Because goja's interrupt is
+// sticky, the watcher re-checks done after waking up before delivering — a
+// late interrupt against an already-finished run would otherwise poison the
+// NEXT run; the ClearInterrupt at run entry (withRuntime / ExecuteSync)
+// absorbs any residue.
+func (e *engine) armCancelWatch(ctx context.Context) func() {
+	e.execMu.Lock()
+	rt := e.runtime
+	e.execMu.Unlock()
+
+	deadline, hasDeadline := ctx.Deadline()
+	var timer *time.Timer
+	if hasDeadline {
+		timer = time.NewTimer(time.Until(deadline))
+	}
+	done := make(chan struct{})
+
+	go func() {
+		var interrupt error
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if timer != nil {
+			select {
+			case <-timer.C:
+				interrupt = context.DeadlineExceeded
+			case <-done:
+				return
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+				interrupt = ctx.Err()
+			case <-done:
+				return
+			}
+		}
+		// The run may have completed while this goroutine was waking up.
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if rt != nil {
+			rt.Interrupt(interrupt)
+		}
+	}()
+
+	return func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		close(done)
+	}
+}
+
+// withRuntime runs fn while holding execMu, providing safe access to the
+// runtime. ctx is the run's cancellation context: a ctx that is already done
+// by the time the run acquires execMu (its budget expired while queued) fails
+// the run instead of executing.
+func (e *engine) withRuntime(ctx context.Context, fn func(rt *goja.Runtime) (any, error)) (any, error) {
 	e.execMu.Lock()
 	defer e.execMu.Unlock()
 	if e.runtime == nil {
 		return nil, ErrJavascriptRuntimeNotInitialized
 	}
+	// A run queued behind execMu can outlive its budget; its watcher may even
+	// have fired an interrupt before the run started. The budget is gone —
+	// fail without running. (The stray interrupt is wiped by ClearInterrupt
+	// below instead of poisoning a future run.)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// goja's interrupt is sticky: swallow any interrupt delivered after the
+	// previous run finished (a late cancellation must not poison this run).
+	e.runtime.ClearInterrupt()
 	return fn(e.runtime)
 }
 
@@ -792,54 +798,12 @@ func (e *engine) RunProgram(ctx context.Context, program *goja.Program) (any, er
 		return nil, ErrJavascriptEngineNotInitialized
 	}
 
-	// Cancellation arming. Deadline-carrying contexts (the budgeted-execution
-	// case) are enforced via a local timer that this function stops BEFORE
-	// closing done. Once stopped, timer.C can never fire, so a
-	// scheduler-starved watcher goroutine that wakes only after the run has
-	// completed can observe nothing but done — a late rt.Interrupt against the
-	// shared runtime (goja's interrupt is sticky and would poison the NEXT
-	// execution) is ruled out by construction. Deadline-less contexts keep the
-	// legacy ctx.Done() watcher, which is their only abort vector.
-	deadline, hasDeadline := ctx.Deadline()
-	var timer *time.Timer
-	if hasDeadline {
-		timer = time.NewTimer(time.Until(deadline))
-	}
-	done := make(chan struct{})
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-		close(done)
-	}()
+	// Cancellation arming (see armCancelWatch): deadline-carrying contexts are
+	// enforced via a local timer that finishArm stops before done closes; the
+	// watcher never takes execMu (that would deadlock against the run itself).
+	defer e.armCancelWatch(ctx)()
 
-	go func() {
-		var interrupt error
-		if timer != nil {
-			select {
-			case <-timer.C:
-				interrupt = context.DeadlineExceeded
-			case <-done:
-			}
-		} else {
-			select {
-			case <-ctx.Done():
-				interrupt = ctx.Err()
-			case <-done:
-			}
-		}
-		if interrupt == nil {
-			return
-		}
-		e.execMu.Lock()
-		rt := e.runtime
-		e.execMu.Unlock()
-		if rt != nil {
-			rt.Interrupt(interrupt)
-		}
-	}()
-
-	result, err := e.withRuntime(func(rt *goja.Runtime) (any, error) {
+	result, err := e.withRuntime(ctx, func(rt *goja.Runtime) (any, error) {
 		val, err := rt.RunProgram(program)
 		if err != nil || val == nil {
 			return nil, err
